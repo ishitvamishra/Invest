@@ -39,25 +39,17 @@ export async function decisionNode(state, config) {
     emit("node_start", "Making final investment decision");
     emit("llm_thinking", "Evaluating all signals for final verdict");
 
-    // Trim payload to avoid token limit errors (Groq TPM)
     const decisionPayload = {
-      company: `${state.companyName} (${state.ticker ?? "?"})`,
+      companyName: state.companyName,
+      ticker: state.ticker,
       exchange: state.exchange,
       riskAppetite: state.riskAppetite,
-      financialData: state.financialData
-        ? {
-            price: state.financialData.currentPrice,
-            marketCap: state.financialData.marketCap,
-            pe: state.financialData.peRatio,
-            margin: state.financialData.profitMargin,
-            revenueGrowth: state.financialData.revenueGrowth,
-          }
-        : null,
+      financialData: state.financialData,
       sentimentScore: state.sentimentScore,
-      executiveSummary: state.analystSummary?.executiveSummary?.slice(0, 400),
-      positiveFactors: (state.positiveFactors ?? []).slice(0, 5),
-      riskFactors: (state.riskFactors ?? []).slice(0, 5),
-      competitorSummary: state.competitorAnalysis?.competitorSummary?.slice(0, 200),
+      analystSummary: state.analystSummary,
+      positiveFactors: state.positiveFactors,
+      riskFactors: state.riskFactors,
+      competitorAnalysis: state.competitorAnalysis,
       errors: state.errors,
     };
 

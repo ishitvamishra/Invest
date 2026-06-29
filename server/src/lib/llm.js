@@ -154,23 +154,22 @@ async function invokeChain(chain, messages) {
 // ── Public API ────────────────────────────────────────────────────
 
 /**
- * FAST chain: Gemini → Cerebras → Groq
- * Gemini first — largest context window, no TPM issues on free tier.
+ * FAST chain: Groq (all keys) → Cerebras (all keys) → Gemini (all keys)
  * @param {Array} messages
  */
 export async function callFastLLM(messages) {
   return invokeChain(
     [
-      ["Gemini", getGeminiPool()],
-      ["Cerebras", getCerebrasPool()],
       ["Groq", getGroqPool()],
+      ["Cerebras", getCerebrasPool()],
+      ["Gemini", getGeminiPool()],
     ],
     messages
   );
 }
 
 /**
- * SMART chain: Gemini → Cerebras → Groq
+ * SMART chain: Gemini (all keys) → Cerebras (all keys) → Groq (all keys)
  * @param {Array} messages
  */
 export async function callSmartLLM(messages) {
