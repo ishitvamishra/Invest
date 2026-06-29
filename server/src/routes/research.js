@@ -36,7 +36,12 @@ router.post("/", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    res.setHeader("Access-Control-Allow-Origin", process.env.CLIENT_URL || "*");
+    // Mirror the request origin so SSE works from any allowed domain
+    const requestOrigin = req.headers.origin;
+    if (requestOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", requestOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
     res.flushHeaders?.();
 
     const emitter = createStreamEmitter();
