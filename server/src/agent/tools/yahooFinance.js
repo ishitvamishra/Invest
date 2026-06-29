@@ -1,6 +1,95 @@
 import YahooFinance from "yahoo-finance2";
 import { searchTavily } from "./tavilySearch.js";
 
+// ── Alpha Vantage (primary — cloud-safe) ──────────────────────────────────
+
+/**
+ * Read a pool of up to 5 Alpha Vantage keys from env.
+ * Reads: ALPHA_VANTAGE_KEY, ALPHA_VANTAGE_KEY_1 … ALPHA_VANTAGE_KEY_4
+ * @returns {string[]}
+ */
+function getAlphaVantageKeys() {
+  const keys = ["", "_1", "_2", "_3", "_4"]
+    .map((s) => process.env[`ALPHA_VANTAGE_KEY${s}`]?.trim())
+    .filter((k) => k && !k.startsWith("your_") && k !== "demo");
+  return [...new Set(keys)];
+}
+
+/**
+ * Fetch a stock quote from Alpha Vantage GLOBAL_QUOTE endpoint.
+ * Returns structured data on success, null on failure.
+ * @param {string} symbol   Exact ticker (e.g. "NVDA", "RELIANCE.NS")
+ * @param {string} apiKey
+ * @returns {Promise<object|null>}
+ */
+async function fetchAlphaVantageQuote(symbol, apiKey) {
+  try {
+    const url =
+      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE` +
+      `&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
+
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+
+    const json = await res.json();
+
+    // Rate-limited or bad key
+    if (json["Note"] || json["Information"] || json["Error Message"]) {
+      return null;
+    }
+
+    const q = json["Global Quote"];
+    if (!q || !q["05. price"]) return null;
+
+    const price = parseFloat(q["05. price"]);
+    const prevClose = parseFloat(q["08. previous close"]);
+
+    if (!price) return null;
+
+    return {
+      currentPrice: price,
+      marketCap: null,          // AV GLOBAL_QUOTE doesn't include market cap
+      peRatio: null,
+      eps: null,
+      revenue: null,
+      netIncome: null,
+      debtToEquity: null,
+      profitMargin: null,
+      week52High: parseFloat(q["03. high"]) || null,  // daily high, not 52w
+      week52Low: parseFloat(q["04. low"]) || null,
+      analystTargetPrice: null,
+      revenueGrowth: null,
+      currency: symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD",
+      shortName: symbol,
+      yahooSymbol: symbol,
+      source: "alphavantage",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try every Alpha Vantage key in the pool for a given symbol.
+ * @param {string} symbol
+ * @returns {Promise<object|null>}
+ */
+async function fetchFromAlphaVantage(symbol) {
+  const keys = getAlphaVantageKeys();
+  if (keys.length === 0) return null;
+
+  for (const key of keys) {
+    const data = await fetchAlphaVantageQuote(symbol, key);
+    if (data) {
+      console.log(`[Finance] Alpha Vantage ✓ (${symbol})`);
+      return data;
+    }
+  }
+  return null;
+}
+
+// ── Yahoo Finance (fallback — may be blocked on cloud IPs) ────────────────
+
 // Yahoo Finance blocks cloud provider IPs — spoof browser headers to bypass
 const yahooFinance = new YahooFinance({
   suppressNotices: ["yahooSurvey"],
@@ -75,17 +164,37 @@ export function buildYahooSymbols(ticker, exchange = null) {
   return [...symbols];
 }
 
+// ── Public API ────────────────────────────────────────────────────────────
+
 /**
  * Fetch comprehensive financial data for a ticker symbol.
+ * Strategy: Alpha Vantage (cloud-safe) → Yahoo Finance (may be blocked on cloud)
  * @param {string} ticker
  * @param {string|null} exchange
+ * @param {string|null} companyName
  * @returns {Promise<object|null>}
  */
 export async function fetchFinancialData(ticker, exchange = null, companyName = null) {
   if (!ticker && !companyName) return null;
 
   const symbolsToTry = buildYahooSymbols(ticker, exchange);
+  const primarySymbol = symbolsToTry[0]; // bare ticker like "NVDA"
 
+  // ── 1. Try Alpha Vantage first (reliable on cloud servers) ──
+  if (primarySymbol) {
+    const avData = await fetchFromAlphaVantage(primarySymbol);
+    if (avData) return avData;
+
+    // For Indian stocks also try with exchange suffix
+    if (symbolsToTry.length > 1) {
+      for (const sym of symbolsToTry.slice(1)) {
+        const avData2 = await fetchFromAlphaVantage(sym);
+        if (avData2) return avData2;
+      }
+    }
+  }
+
+  // ── 2. Fall back to Yahoo Finance (works locally; may be blocked in cloud) ──
   for (const symbol of symbolsToTry) {
     const data = await fetchQuoteSummary(symbol);
     if (data) return data;
@@ -94,19 +203,26 @@ export async function fetchFinancialData(ticker, exchange = null, companyName = 
   if (companyName) {
     const searchedSymbol = await searchYahooSymbol(companyName, exchange);
     if (searchedSymbol) {
+      // Try AV with searched symbol first
+      const avData = await fetchFromAlphaVantage(searchedSymbol);
+      if (avData) return avData;
+
       const data = await fetchQuoteSummary(searchedSymbol);
       if (data) return data;
     }
 
     const webSymbol = await resolveSymbolViaWeb(companyName, exchange);
     if (webSymbol) {
+      const avData = await fetchFromAlphaVantage(webSymbol);
+      if (avData) return avData;
+
       const data = await fetchQuoteSummary(webSymbol);
       if (data) return data;
     }
   }
 
   console.error(
-    `Yahoo Finance fetch failed for "${ticker ?? companyName}" (tried: ${symbolsToTry.join(", ")})`
+    `[Finance] All sources failed for "${ticker ?? companyName}" (tried: ${symbolsToTry.join(", ")})`
   );
   return null;
 }
@@ -211,6 +327,7 @@ async function resolveSymbolViaWeb(companyName, exchange = null) {
 }
 
 /**
+ * Fetch via Yahoo Finance quoteSummary (may fail on cloud IPs).
  * @param {string} symbol
  * @returns {Promise<object|null>}
  */
@@ -270,6 +387,7 @@ async function fetchQuoteSummary(symbol) {
       currency: price.currency ?? "USD",
       shortName: price.shortName ?? price.longName ?? symbol,
       yahooSymbol: symbol,
+      source: "yahoo",
     };
   } catch {
     return null;
