@@ -38,7 +38,7 @@ async function fetchRapidApiQuote(symbol, apiKey) {
   try {
     // Primary: /api/v2/markets/tickers?tickers=SYMBOL (returns array with full quote)
     const res = await fetch(
-      `https://${RAPIDAPI_HOST}/api/v2/markets/tickers?tickers=${encodeURIComponent(symbol)}&type=STOCKS`,
+      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/quotes?ticker=${encodeURIComponent(symbol)}`,
       {
         headers: {
           "x-rapidapi-host": RAPIDAPI_HOST,
@@ -70,7 +70,7 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     // Response shape: { body: [{ ...quote fields }] } or { data: [...] }
     const items = json?.body ?? json?.data ?? json?.result ?? [];
     const q = Array.isArray(items) ? items[0] : items;
-
+    console.log(`[Finance] RAW Q for ${symbol}:`, JSON.stringify(q, null, 2));
     if (!q) {
       console.warn(`[Finance] RapidAPI empty body for ${symbol}`);
       return null;
