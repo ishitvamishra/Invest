@@ -17,6 +17,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = useCallback(async (email, password) => {
+    // Clear any stale session first to avoid "session already active" errors
+    try { await account.deleteSession("current"); } catch (_) { /* no active session */ }
     await account.createEmailPasswordSession(email, password);
     const user = await account.get();
     setCurrentUser(user);
@@ -24,6 +26,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const signup = useCallback(async (email, password, name) => {
+    // Clear any stale session first to avoid "session already active" errors
+    try { await account.deleteSession("current"); } catch (_) { /* no active session */ }
     await account.create(ID.unique(), email, password, name);
     // Auto-login after signup
     await account.createEmailPasswordSession(email, password);

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, Navigate } from "react-router-dom";
 import { TrendingUp, AlertCircle, Eye, EyeOff, Brain, BarChart3, Target, Shield } from "lucide-react";
 import { useAuth } from "../context/AuthContext.jsx";
 
@@ -11,8 +11,11 @@ const FEATURES = [
 ];
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, currentUser, loading } = useAuth();
   const navigate = useNavigate();
+
+  // Already logged in → go home
+  if (!loading && currentUser) return <Navigate to="/" replace />;
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
