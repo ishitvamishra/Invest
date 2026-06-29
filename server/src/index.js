@@ -27,6 +27,7 @@ const PORT = process.env.PORT || 8000;
 
 // Support comma-separated list of allowed origins, e.g.:
 // CLIENT_URL=http://localhost:5173,https://invest-xxx.vercel.app
+// On Vercel (experimentalServices), frontend+backend share the same domain — CORS not needed in prod
 const rawOrigins = process.env.CLIENT_URL || "http://localhost:5173";
 const allowedOrigins = rawOrigins.split(",").map((o) => o.trim());
 

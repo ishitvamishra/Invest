@@ -1,7 +1,14 @@
 {
-  "buildCommand": "cd client && npm install && npm run build",
-  "outputDirectory": "client/dist",
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
+  "experimentalServices": {
+    "frontend": {
+      "root": "client",
+      "routePrefix": "/",
+      "framework": "vite"
+    },
+    "backend": {
+      "root": "server",
+      "entrypoint": "src/index.js",
+      "routePrefix": "/api"
+    }
+  }
 }
