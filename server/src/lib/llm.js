@@ -50,8 +50,8 @@ function getGroqPool() {
   if (groqPool) return groqPool;
   groqPool = getEnvKeys("GROQ_API_KEY").map(
     (apiKey) =>
-      // llama3-70b-8192: higher quality, same free-tier TPM cap as 8b-instant
-      new ChatGroq({ model: "llama3-70b-8192", temperature: 0.2, apiKey })
+      // llama-3.3-70b-versatile: current active model (llama3-70b-8192 decommissioned June 2026)
+      new ChatGroq({ model: "llama-3.3-70b-versatile", temperature: 0.2, apiKey })
   );
   return groqPool;
 }
@@ -78,9 +78,9 @@ function getCerebrasPool() {
   if (cerebrasPool) return cerebrasPool;
   cerebrasPool = getEnvKeys("CEREBRAS_API_KEY").map(
     (apiKey) =>
-      // llama-3.1-8b: current free-tier model (llama-3.3-70b deprecated Feb 2026 → 404)
+      // llama3.1-8b: correct Cerebras model ID (no dash: llama3.1-8b not llama-3.1-8b)
       new ChatOpenAI({
-        model: "llama-3.1-8b",
+        model: "llama3.1-8b",
         temperature: 0.3,
         apiKey,
         configuration: {
