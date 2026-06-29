@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: aria-backend
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 8000
+      # Add the rest of your env vars in the Render dashboard:
+      # GROQ_API_KEY_1, GROQ_API_KEY_2, GROQ_API_KEY_3, GROQ_API_KEY_4
+      # GOOGLE_API_KEY_1, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3, GOOGLE_API_KEY_4
+      # CEREBRAS_API_KEY_1, CEREBRAS_API_KEY_2, CEREBRAS_API_KEY_3, CEREBRAS_API_KEY_4
+      # TAVILY_API_KEY_1, TAVILY_API_KEY_2, TAVILY_API_KEY_3, TAVILY_API_KEY_4
+      # APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID, APPWRITE_API_KEY, APPWRITE_DATABASE_ID
+      # CLIENT_URL=https://your-app.vercel.app
