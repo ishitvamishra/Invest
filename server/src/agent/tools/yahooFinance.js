@@ -154,14 +154,16 @@ async function fetchFromTavily(companyName, ticker, exchange) {
       ticker?.endsWith(".NS") ||
       ticker?.endsWith(".BO");
 
+    const sym = ticker?.replace(/\.(NS|BO|L|T)$/, "") ?? companyName;
+
     const queries = [
-      `${companyName} stock price market cap PE ratio 2024`,
-      `${ticker ?? companyName} share price today`,
+      `${sym} stock price PE ratio EPS market cap revenue profit margin`,
+      `${companyName} financial data 52 week high low earnings per share`,
     ];
 
     const allResults = [];
     for (const q of queries) {
-      const results = await searchTavily(q, 5);
+      const results = await searchTavily(q, 6);
       allResults.push(...results);
     }
 
@@ -169,64 +171,76 @@ async function fetchFromTavily(companyName, ticker, exchange) {
 
     const corpus = allResults
       .map((r) => `${r.title} ${r.snippet}`)
-      .join(" ")
-      .replace(/[,]/g, "");
+      .join(" ");
 
     console.log(`[Finance] Tavily scraping financials for ${companyName}`);
 
+    // Price — look for explicit stock price mentions
     const price = extractNum(corpus, [
-      /(?:price|trading at|trades at|last price)[:\s]+[$₹]?\s*([\d.]+)\s*(B|M|K)?/i,
-      /[$₹]\s*([\d.]+)\s*(B|M|K)?(?:\s*per share)/i,
-      /(?:current price|stock price)[^\d]+([\d.]+)\s*(B|M|K)?/i,
+      /(?:stock price|share price|trading at|last price|current price)[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /[$₹]\s*([\d,]+\.?\d*)\s*(B|M|K)?(?:\s*(?:per share|USD|INR))/i,
+      /(?:closed?|close) (?:at )?[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
     ]);
 
+    // Market cap
     const marketCap = extractNum(corpus, [
-      /market cap[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
-      /market capitaliz\w+[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
-      /mkt cap[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /market cap(?:itali[sz]ation)?[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
+      /mkt\.?\s*cap[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
     ]);
 
+    // P/E ratio
     const peRatio = extractNum(corpus, [
-      /p\/e ratio[^\d]+([\d.]+)/i,
-      /price.earnings[^\d]+([\d.]+)/i,
-      /pe ratio[^\d]+([\d.]+)/i,
-      /trailing p\/e[^\d]+([\d.]+)/i,
+      /(?:p\/e|price.to.earnings|trailing p\/e|forward p\/e)[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /pe\s+ratio[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
     ]);
 
+    // EPS
     const eps = extractNum(corpus, [
-      /eps[^\d]+([\d.]+)/i,
-      /earnings per share[^\d]+([\d.]+)/i,
+      /(?:eps|earnings per share)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /(?:ttm eps|diluted eps)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
     ]);
 
+    // Revenue
     const revenue = extractNum(corpus, [
-      /revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
-      /total revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
-      /annual revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /(?:total revenue|annual revenue|revenue)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
     ]);
 
-    const profitMargin = extractNum(corpus, [
-      /profit margin[^\d]+([\d.]+)\s*%/i,
-      /net margin[^\d]+([\d.]+)\s*%/i,
+    // Profit margin — extract as percentage, store as decimal
+    const profitMarginPct = extractNum(corpus, [
+      /(?:profit margin|net margin|net profit margin)[^\d]{0,6}([\d,]+\.?\d*)\s*%/i,
     ]);
 
+    // 52-week high/low
     const week52High = extractNum(corpus, [
-      /52.week high[^\d]+([\d.]+)/i,
-      /year high[^\d]+([\d.]+)/i,
+      /52.?w(?:eek)?\s*h(?:igh)?[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /(?:year high|yearly high)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
     ]);
 
     const week52Low = extractNum(corpus, [
-      /52.week low[^\d]+([\d.]+)/i,
-      /year low[^\d]+([\d.]+)/i,
+      /52.?w(?:eek)?\s*l(?:ow)?[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /(?:year low|yearly low)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
     ]);
 
-    // Need at least a price or market cap to be useful
+    // Analyst target price
+    const analystTarget = extractNum(corpus, [
+      /(?:analyst|price) target[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+      /(?:target price|consensus target)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
+    ]);
+
+    // Debt to equity
+    const debtToEquity = extractNum(corpus, [
+      /(?:debt.to.equity|d\/e ratio)[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
+    ]);
+
+    // Need at least price or market cap
     if (!price && !marketCap) {
-      console.warn(`[Finance] Tavily scrape found no price/marketcap for ${companyName}`);
+      console.warn(`[Finance] Tavily scrape: no price/mktcap found for ${companyName}`);
       return null;
     }
 
+    const profitMargin = profitMarginPct ? profitMarginPct / 100 : null;
     const currency = isIndian ? "INR" : "USD";
-    console.log(`[Finance] Tavily ✓ ${companyName} @ ${currency} ${price ?? "?"}`);
+    console.log(`[Finance] Tavily ✓ ${companyName} — price:${price} mktcap:${marketCap} pe:${peRatio} eps:${eps}`);
 
     return {
       currentPrice: price,
@@ -234,12 +248,12 @@ async function fetchFromTavily(companyName, ticker, exchange) {
       peRatio,
       eps,
       revenue,
-      netIncome: revenue && profitMargin ? revenue * (profitMargin / 100) : null,
-      debtToEquity: null,
-      profitMargin: profitMargin ? profitMargin / 100 : null,
+      netIncome: revenue && profitMargin ? revenue * profitMargin : null,
+      debtToEquity,
+      profitMargin,
       week52High,
       week52Low,
-      analystTargetPrice: null,
+      analystTargetPrice: analystTarget,
       revenueGrowth: null,
       currency,
       shortName: companyName,
@@ -356,18 +370,35 @@ export async function fetchFinancialData(ticker, exchange = null, companyName = 
 
   const bareSymbol = symbolsToTry[0]; // plain ticker without suffix
 
-  // ── 1. Polygon.io (US stocks, free, no IP blocks) ──
+  // ── 1. Polygon.io (US stocks, free, no IP blocks) — price only ──
+  let baseData = null;
   if (bareSymbol && !bareSymbol.includes(".")) {
-    const polygonData = await fetchFromPolygon(bareSymbol);
-    if (polygonData) return polygonData;
+    baseData = await fetchFromPolygon(bareSymbol);
   }
 
-  // ── 2. Tavily financial scrape (works everywhere, global coverage) ──
+  // ── 2. Tavily financial scrape — always run to get fundamentals ──
+  //    If Polygon gave us a price, Tavily enriches with P/E, EPS, margins etc.
+  //    If Polygon failed, Tavily is the primary source.
   const name = companyName ?? ticker;
   if (name) {
     const tavilyData = await fetchFromTavily(name, ticker, exchange);
-    if (tavilyData) return tavilyData;
+    if (tavilyData) {
+      if (baseData) {
+        // Merge: keep Polygon price (more accurate), fill nulls from Tavily
+        return {
+          ...tavilyData,
+          currentPrice: baseData.currentPrice ?? tavilyData.currentPrice,
+          marketCap:    baseData.marketCap    ?? tavilyData.marketCap,
+          shortName:    baseData.shortName    ?? tavilyData.shortName,
+          source: "polygon+tavily",
+        };
+      }
+      return tavilyData;
+    }
   }
+
+  // If Polygon succeeded but Tavily found nothing, return Polygon data as-is
+  if (baseData) return baseData;
 
   // ── 3. Alpha Vantage (last resort — 25 req/day) ──
   for (const symbol of symbolsToTry) {
