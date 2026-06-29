@@ -10,16 +10,14 @@ const researchSchema = z.object({
   riskAppetite: z.enum(["low", "medium", "high"]).optional().default("medium"),
 });
 
-// Allowed origins for CORS
-const rawOrigins = process.env.CLIENT_URL || "";
-const ALLOWED_ORIGINS = rawOrigins
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
+// Allowed origins — comma-separated CLIENT_URL env var, with hardcoded fallbacks
+const rawOrigins = process.env.CLIENT_URL
+  || "http://localhost:5173,https://invest-seven-delta.vercel.app";
+const ALLOWED_ORIGINS = rawOrigins.split(",").map((o) => o.trim()).filter(Boolean);
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
-  if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");

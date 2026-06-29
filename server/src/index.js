@@ -25,20 +25,20 @@ if (missingProviders.length > 0) {
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// Support comma-separated list of allowed origins, e.g.:
-// CLIENT_URL=http://localhost:5173,https://invest-seven-delta.vercel.app
-const rawOrigins = process.env.CLIENT_URL || "http://localhost:5173";
+// Support comma-separated list of allowed origins via CLIENT_URL env var.
+// Hardcoded fallbacks cover local dev + the known Vercel deployment.
+// In production set:  CLIENT_URL=http://localhost:5173,https://invest-seven-delta.vercel.app
+const rawOrigins = process.env.CLIENT_URL
+  || "http://localhost:5173,https://invest-seven-delta.vercel.app";
 const ALLOWED_ORIGINS = rawOrigins.split(",").map((o) => o.trim()).filter(Boolean);
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow server-to-server requests (no origin) and listed origins
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS: origin ${origin} not allowed`));
-      }
+    origin(origin, callback) {
+      // Allow server-to-server / curl requests (no Origin header)
+      if (!origin) return callback(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin "${origin}" not allowed`));
     },
     credentials: true,
   })
