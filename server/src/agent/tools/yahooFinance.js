@@ -1,315 +1,304 @@
-import YahooFinance from "yahoo-finance2";
+/**
+ * Financial data fetcher — cloud-safe priority chain:
+ *
+ *  1. Polygon.io     — free tier, no IP blocks, great for US/global stocks
+ *  2. Tavily scrape  — extracts financials from web results (works everywhere)
+ *  3. Alpha Vantage  — last resort, 25 req/day free
+ */
+
 import { searchTavily } from "./tavilySearch.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Financial Modeling Prep  (PRIMARY — works on all cloud IPs, 250 req/day free)
-// Sign up free at: https://financialmodelingprep.com/developer/docs/
+// Key helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getFmpKeys() {
+function getKeys(baseName) {
   const keys = ["", "_1", "_2", "_3", "_4"]
-    .map((s) => process.env[`FMP_API_KEY${s}`]?.trim())
-    .filter((k) => k && !k.startsWith("your_"));
-  return [...new Set(keys)];
-}
-
-/**
- * Fetch a full quote + profile from FMP for a given ticker.
- * Uses the new /stable/ endpoints (free tier compatible).
- * @param {string} symbol
- * @param {string} apiKey
- * @returns {Promise<object|null>}
- */
-async function fetchFmpQuote(symbol, apiKey) {
-  try {
-    // Use the new stable API base — /v3/ returns 403 on free tier
-    const BASE = "https://financialmodelingprep.com/stable";
-
-    const [quoteRes, profileRes] = await Promise.all([
-      fetch(
-        `${BASE}/quote?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`,
-        { signal: AbortSignal.timeout(10000) }
-      ),
-      fetch(
-        `${BASE}/profile?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`,
-        { signal: AbortSignal.timeout(10000) }
-      ),
-    ]);
-
-    if (!quoteRes.ok) {
-      console.warn(`[Finance] FMP HTTP ${quoteRes.status} for ${symbol}`);
-      return null;
-    }
-
-    const quoteJson = await quoteRes.json();
-    const profileJson = profileRes.ok ? await profileRes.json() : [];
-
-    // FMP returns an array; check for error objects
-    if (!Array.isArray(quoteJson) || quoteJson.length === 0) {
-      const msg = quoteJson?.["Error Message"] ?? quoteJson?.message ?? "";
-      if (msg) console.warn(`[Finance] FMP error for ${symbol}: ${msg.slice(0, 120)}`);
-      else console.warn(`[Finance] FMP empty response for ${symbol}`);
-      return null;
-    }
-
-    const q = quoteJson[0];
-    const p = Array.isArray(profileJson) && profileJson.length > 0 ? profileJson[0] : {};
-
-    const safeNum = (v) =>
-      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
-
-    const currentPrice = safeNum(q.price);
-    const marketCap = safeNum(q.marketCap ?? p.mktCap);
-
-    if (!currentPrice) {
-      console.warn(`[Finance] FMP no price for ${symbol}`);
-      return null;
-    }
-
-    const isIndian =
-      symbol.endsWith(".NS") ||
-      symbol.endsWith(".BO") ||
-      (p.exchangeShortName ?? "").match(/NSE|BSE/i);
-    const currency = p.currency ?? (isIndian ? "INR" : "USD");
-
-    console.log(`[Finance] FMP ✓ ${symbol} @ ${currency} ${currentPrice}`);
-
-    return {
-      currentPrice,
-      marketCap,
-      peRatio: safeNum(q.pe ?? p.pe),
-      eps: safeNum(q.eps),
-      revenue: safeNum(p.revenue),
-      netIncome: safeNum(
-        p.netIncomeRatio != null && p.revenue != null
-          ? p.revenue * p.netIncomeRatio
-          : null
-      ),
-      debtToEquity: safeNum(p.debtToEquity),
-      profitMargin: safeNum(p.netIncomeRatio),
-      week52High: safeNum(q.yearHigh),
-      week52Low: safeNum(q.yearLow),
-      analystTargetPrice: safeNum(q.priceAvg200 ?? null),
-      revenueGrowth: null,
-      currency,
-      shortName: p.companyName ?? q.name ?? symbol,
-      yahooSymbol: symbol,
-      source: "fmp",
-    };
-  } catch (err) {
-    console.warn(`[Finance] FMP exception for ${symbol}: ${err.message}`);
-    return null;
-  }
-}
-
-/**
- * Search FMP for a ticker by company name.
- * @param {string} companyName
- * @param {string} apiKey
- * @returns {Promise<string|null>}
- */
-async function searchFmpSymbol(companyName, apiKey) {
-  try {
-    const BASE = "https://financialmodelingprep.com/stable";
-    const res = await fetch(
-      `${BASE}/search?query=${encodeURIComponent(companyName)}&limit=10&apikey=${apiKey}`,
-      { signal: AbortSignal.timeout(8000) }
-    );
-    if (!res.ok) return null;
-
-    const results = await res.json();
-    if (!Array.isArray(results) || results.length === 0) return null;
-
-    const nameLower = companyName.toLowerCase();
-
-    // Prefer exact name match, then NSE/BSE listed, then first result
-    const exact = results.find((r) =>
-      (r.name ?? "").toLowerCase().includes(nameLower) ||
-      nameLower.includes((r.name ?? "").toLowerCase().split(" ")[0])
-    );
-    const indian = results.find(
-      (r) => r.exchangeShortName === "NSE" || r.exchangeShortName === "BSE"
-    );
-    const best = exact ?? indian ?? results[0];
-
-    return best?.symbol ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Try every FMP key in the pool for a symbol, then search by name as fallback.
- * @param {string|null} ticker
- * @param {string|null} companyName
- * @param {string[]} symbolsToTry
- * @returns {Promise<object|null>}
- */
-async function fetchFromFmp(ticker, companyName, symbolsToTry) {
-  const keys = getFmpKeys();
-  if (keys.length === 0) {
-    console.warn("[Finance] FMP skipped — no FMP_API_KEY env vars found");
-    return null;
-  }
-
-  console.log(`[Finance] FMP trying ${symbolsToTry.join(", ")} with ${keys.length} key(s)`);
-
-  // Try each symbol with each key
-  for (const symbol of symbolsToTry) {
-    for (const key of keys) {
-      const data = await fetchFmpQuote(symbol, key);
-      if (data) return data;
-    }
-  }
-
-  // Try searching by company name with first key
-  if (companyName) {
-    const found = await searchFmpSymbol(companyName, keys[0]);
-    if (found && !symbolsToTry.includes(found)) {
-      console.log(`[Finance] FMP search found symbol: ${found}`);
-      for (const key of keys) {
-        const data = await fetchFmpQuote(found, key);
-        if (data) return data;
-      }
-    }
-  }
-
-  console.warn(`[Finance] FMP all attempts failed for ${ticker ?? companyName}`);
-  return null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Alpha Vantage  (SECONDARY fallback — 25 req/day free per key)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function getAlphaVantageKeys() {
-  const keys = ["", "_1", "_2", "_3", "_4"]
-    .map((s) => process.env[`ALPHA_VANTAGE_KEY${s}`]?.trim())
+    .map((s) => process.env[`${baseName}${s}`]?.trim())
     .filter((k) => k && !k.startsWith("your_") && k !== "demo");
   return [...new Set(keys)];
 }
 
-async function fetchAlphaVantageQuote(symbol, apiKey) {
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Polygon.io  (free tier — unlimited EOD, 5 req/min, no IP blocks)
+//    Sign up free at: https://polygon.io/
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch quote + details from Polygon for a US ticker.
+ * Uses /v2/snapshot/locale/us/markets/stocks/tickers/:ticker
+ * and /v3/reference/tickers/:ticker for fundamentals.
+ * @param {string} symbol  Plain US ticker, e.g. "AAPL", "CRM"
+ * @param {string} apiKey
+ * @returns {Promise<object|null>}
+ */
+async function fetchPolygonData(symbol, apiKey) {
+  // Polygon only covers US-listed tickers — skip Indian suffixes
+  if (symbol.includes(".")) return null;
+
   try {
-    const url =
-      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE` +
-      `&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
+    const [snapRes, detailRes] = await Promise.all([
+      fetch(
+        `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(symbol)}?apiKey=${apiKey}`,
+        { signal: AbortSignal.timeout(10000) }
+      ),
+      fetch(
+        `https://api.polygon.io/v3/reference/tickers/${encodeURIComponent(symbol)}?apiKey=${apiKey}`,
+        { signal: AbortSignal.timeout(10000) }
+      ),
+    ]);
 
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-
-    const json = await res.json();
-    if (json["Note"] || json["Information"]) {
-      console.warn(`[Finance] AV rate-limited for ${symbol}`);
+    if (!snapRes.ok) {
+      if (snapRes.status === 429) console.warn(`[Finance] Polygon rate-limited for ${symbol}`);
+      else console.warn(`[Finance] Polygon HTTP ${snapRes.status} for ${symbol}`);
       return null;
     }
-    if (json["Error Message"]) return null;
 
-    const q = json["Global Quote"];
-    if (!q || !q["05. price"]) return null;
+    const snapJson = await snapRes.json();
+    const detailJson = detailRes.ok ? await detailRes.json() : {};
 
-    const price = parseFloat(q["05. price"]);
-    if (!price) return null;
+    // Polygon wraps result in { ticker: { ... } }
+    const t = snapJson?.ticker;
+    const day = t?.day ?? {};
+    const prevDay = t?.prevDay ?? {};
+    const details = detailJson?.results ?? {};
+
+    const safeNum = (v) =>
+      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
+
+    // Use current day price, fall back to prev day close
+    const currentPrice = safeNum(day.c ?? prevDay.c);
+    const marketCap = safeNum(details.market_cap);
+
+    if (!currentPrice) {
+      console.warn(`[Finance] Polygon no price for ${symbol}`);
+      return null;
+    }
+
+    console.log(`[Finance] Polygon ✓ ${symbol} @ $${currentPrice}`);
 
     return {
-      currentPrice: price,
-      marketCap: null,
-      peRatio: null,
+      currentPrice,
+      marketCap,
+      peRatio: null,          // not on Polygon free tier
       eps: null,
       revenue: null,
       netIncome: null,
       debtToEquity: null,
       profitMargin: null,
-      week52High: parseFloat(q["03. high"]) || null,
-      week52Low: parseFloat(q["04. low"]) || null,
+      week52High: safeNum(details.week_52_high ?? t?.todaysChangePerc),
+      week52Low: safeNum(details.week_52_low),
       analystTargetPrice: null,
       revenueGrowth: null,
-      currency: symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD",
-      shortName: symbol,
+      currency: "USD",
+      shortName: details.name ?? symbol,
       yahooSymbol: symbol,
-      source: "alphavantage",
+      source: "polygon",
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[Finance] Polygon exception for ${symbol}: ${err.message}`);
     return null;
   }
 }
 
-async function fetchFromAlphaVantage(symbol) {
-  const keys = getAlphaVantageKeys();
-  if (keys.length === 0) return null;
-
+async function fetchFromPolygon(symbol) {
+  const keys = getKeys("POLYGON_API_KEY");
+  if (keys.length === 0) {
+    console.warn("[Finance] Polygon skipped — no POLYGON_API_KEY env vars");
+    return null;
+  }
+  console.log(`[Finance] Polygon trying ${symbol} with ${keys.length} key(s)`);
   for (const key of keys) {
-    const data = await fetchAlphaVantageQuote(symbol, key);
-    if (data) {
-      console.log(`[Finance] AV ✓ ${symbol} @ ${data.currentPrice}`);
-      return data;
+    const data = await fetchPolygonData(symbol, key);
+    if (data) return data;
+  }
+  console.warn(`[Finance] Polygon all key(s) failed for ${symbol}`);
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Tavily financial scrape  (works everywhere, extracts from web results)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Extract a numeric value from text using multiple regex patterns.
+ * @param {string} text
+ * @param {RegExp[]} patterns
+ * @returns {number|null}
+ */
+function extractNum(text, patterns) {
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      // Handle B/M/T/K suffixes
+      let v = parseFloat(m[1].replace(/,/g, ""));
+      const suffix = (m[2] ?? "").toUpperCase();
+      if (suffix === "T") v *= 1e12;
+      else if (suffix === "B") v *= 1e9;
+      else if (suffix === "M") v *= 1e6;
+      else if (suffix === "K") v *= 1e3;
+      if (!Number.isNaN(v) && v > 0) return v;
     }
   }
   return null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Yahoo Finance  (LOCAL fallback — blocked on most cloud IPs)
-// ─────────────────────────────────────────────────────────────────────────────
-
-const yahooFinance = new YahooFinance({
-  suppressNotices: ["yahooSurvey"],
-  fetchOptions: {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.5",
-    },
-  },
-});
-
-async function fetchQuoteSummary(symbol) {
+/**
+ * Scrape financial metrics from Tavily search results.
+ * @param {string} companyName
+ * @param {string|null} ticker
+ * @param {string|null} exchange
+ * @returns {Promise<object|null>}
+ */
+async function fetchFromTavily(companyName, ticker, exchange) {
   try {
-    const summary = await yahooFinance.quoteSummary(
-      symbol,
-      { modules: ["price", "summaryDetail", "financialData", "defaultKeyStatistics"] },
-      { validateResult: false }
-    );
+    const isIndian =
+      (exchange ?? "").toUpperCase().match(/NSE|BSE|INDIA/) ||
+      ticker?.endsWith(".NS") ||
+      ticker?.endsWith(".BO");
 
-    const price = summary.price ?? {};
-    const summaryDetail = summary.summaryDetail ?? {};
-    const financialData = summary.financialData ?? {};
-    const keyStats = summary.defaultKeyStatistics ?? {};
+    const queries = [
+      `${companyName} stock price market cap PE ratio 2024`,
+      `${ticker ?? companyName} share price today`,
+    ];
 
-    const safeNum = (v) =>
-      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
+    const allResults = [];
+    for (const q of queries) {
+      const results = await searchTavily(q, 5);
+      allResults.push(...results);
+    }
 
-    const currentPrice = safeNum(price.regularMarketPrice);
-    const marketCap = safeNum(price.marketCap ?? summaryDetail.marketCap);
-    if (!currentPrice && !marketCap) return null;
+    if (allResults.length === 0) return null;
 
-    console.log(`[Finance] Yahoo ✓ ${symbol} @ ${currentPrice}`);
+    const corpus = allResults
+      .map((r) => `${r.title} ${r.snippet}`)
+      .join(" ")
+      .replace(/[,]/g, "");
+
+    console.log(`[Finance] Tavily scraping financials for ${companyName}`);
+
+    const price = extractNum(corpus, [
+      /(?:price|trading at|trades at|last price)[:\s]+[$₹]?\s*([\d.]+)\s*(B|M|K)?/i,
+      /[$₹]\s*([\d.]+)\s*(B|M|K)?(?:\s*per share)/i,
+      /(?:current price|stock price)[^\d]+([\d.]+)\s*(B|M|K)?/i,
+    ]);
+
+    const marketCap = extractNum(corpus, [
+      /market cap[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /market capitaliz\w+[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /mkt cap[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+    ]);
+
+    const peRatio = extractNum(corpus, [
+      /p\/e ratio[^\d]+([\d.]+)/i,
+      /price.earnings[^\d]+([\d.]+)/i,
+      /pe ratio[^\d]+([\d.]+)/i,
+      /trailing p\/e[^\d]+([\d.]+)/i,
+    ]);
+
+    const eps = extractNum(corpus, [
+      /eps[^\d]+([\d.]+)/i,
+      /earnings per share[^\d]+([\d.]+)/i,
+    ]);
+
+    const revenue = extractNum(corpus, [
+      /revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /total revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+      /annual revenue[^\d]+([\d.]+)\s*(T|B|M|K)?/i,
+    ]);
+
+    const profitMargin = extractNum(corpus, [
+      /profit margin[^\d]+([\d.]+)\s*%/i,
+      /net margin[^\d]+([\d.]+)\s*%/i,
+    ]);
+
+    const week52High = extractNum(corpus, [
+      /52.week high[^\d]+([\d.]+)/i,
+      /year high[^\d]+([\d.]+)/i,
+    ]);
+
+    const week52Low = extractNum(corpus, [
+      /52.week low[^\d]+([\d.]+)/i,
+      /year low[^\d]+([\d.]+)/i,
+    ]);
+
+    // Need at least a price or market cap to be useful
+    if (!price && !marketCap) {
+      console.warn(`[Finance] Tavily scrape found no price/marketcap for ${companyName}`);
+      return null;
+    }
+
+    const currency = isIndian ? "INR" : "USD";
+    console.log(`[Finance] Tavily ✓ ${companyName} @ ${currency} ${price ?? "?"}`);
+
     return {
-      currentPrice,
+      currentPrice: price,
       marketCap,
-      peRatio: safeNum(summaryDetail.trailingPE ?? keyStats.trailingPE),
-      eps: safeNum(keyStats.trailingEps),
-      revenue: safeNum(financialData.totalRevenue),
-      netIncome: safeNum(
-        financialData.profitMargins && financialData.totalRevenue
-          ? financialData.totalRevenue * financialData.profitMargins
-          : null
-      ),
-      debtToEquity: safeNum(financialData.debtToEquity),
-      profitMargin: safeNum(financialData.profitMargins),
-      week52High: safeNum(summaryDetail.fiftyTwoWeekHigh),
-      week52Low: safeNum(summaryDetail.fiftyTwoWeekLow),
-      analystTargetPrice: safeNum(financialData.targetMeanPrice),
-      revenueGrowth: safeNum(financialData.revenueGrowth),
-      currency: price.currency ?? "USD",
-      shortName: price.shortName ?? price.longName ?? symbol,
-      yahooSymbol: symbol,
-      source: "yahoo",
+      peRatio,
+      eps,
+      revenue,
+      netIncome: revenue && profitMargin ? revenue * (profitMargin / 100) : null,
+      debtToEquity: null,
+      profitMargin: profitMargin ? profitMargin / 100 : null,
+      week52High,
+      week52Low,
+      analystTargetPrice: null,
+      revenueGrowth: null,
+      currency,
+      shortName: companyName,
+      yahooSymbol: ticker ?? companyName,
+      source: "tavily",
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[Finance] Tavily scrape error: ${err.message}`);
     return null;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Alpha Vantage  (last resort — 25 req/day free)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fetchAlphaVantageQuote(symbol, apiKey) {
+  try {
+    const res = await fetch(
+      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json["Note"] || json["Information"]) {
+      console.warn(`[Finance] AV rate-limited for ${symbol}`);
+      return null;
+    }
+    const q = json["Global Quote"];
+    if (!q?.["05. price"]) return null;
+    const price = parseFloat(q["05. price"]);
+    if (!price) return null;
+    console.log(`[Finance] AV ✓ ${symbol} @ ${price}`);
+    return {
+      currentPrice: price,
+      marketCap: null, peRatio: null, eps: null, revenue: null,
+      netIncome: null, debtToEquity: null, profitMargin: null,
+      week52High: parseFloat(q["03. high"]) || null,
+      week52Low: parseFloat(q["04. low"]) || null,
+      analystTargetPrice: null, revenueGrowth: null,
+      currency: symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD",
+      shortName: symbol,
+      yahooSymbol: symbol,
+      source: "alphavantage",
+    };
+  } catch { return null; }
+}
+
+async function fetchFromAlphaVantage(symbol) {
+  const keys = getKeys("ALPHA_VANTAGE_KEY");
+  if (keys.length === 0) return null;
+  for (const key of keys) {
+    const data = await fetchAlphaVantageQuote(symbol, key);
+    if (data) return data;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,54 +311,25 @@ const EXCHANGE_SUFFIX = {
   FRA: ".F", XETRA: ".DE",
 };
 
-const INDIAN_COMPANY_RE =
+const INDIAN_NAME_RE =
   /reliance|tata|infosys|wipro|hdfc|icici|bajaj|adani|airtel|hcl|mahindra|kotak|sbi|ongc|itc|hindustan|maruti|ultratech/i;
 
 export function buildYahooSymbols(ticker, exchange = null) {
   if (!ticker) return [];
-
   const symbols = new Set();
   const upper = ticker.toUpperCase();
   symbols.add(upper);
-
   if (upper.includes(".")) return [...symbols];
 
   const exchangeKey = (exchange ?? "").toUpperCase().replace(/[^A-Z]/g, "");
-
   for (const [key, suffix] of Object.entries(EXCHANGE_SUFFIX)) {
     if (exchangeKey.includes(key)) symbols.add(`${upper}${suffix}`);
   }
-
-  const isIndianHint =
-    exchangeKey.match(/NSE|BSE|INDIA|BOMBAY/) != null;
-
-  if (isIndianHint) {
+  if (exchangeKey.match(/NSE|BSE|INDIA|BOMBAY/)) {
     symbols.add(`${upper}.NS`);
     symbols.add(`${upper}.BO`);
   }
-
   return [...symbols];
-}
-
-async function resolveSymbolViaWeb(companyName, exchange = null) {
-  try {
-    const hint = (exchange ?? "").toUpperCase().includes("NSE") ? "NSE" : "stock";
-    const results = await searchTavily(
-      `${companyName} ${hint} ticker symbol exchange`,
-      5
-    );
-    const corpus = results.map((r) => `${r.title} ${r.snippet}`).join("\n");
-
-    const dotted = corpus.match(/\b([A-Z][A-Z0-9]{1,11})\.(NS|BO|L|TO|AX)\b/);
-    if (dotted) return `${dotted[1]}.${dotted[2]}`;
-
-    const nse = corpus.match(/\b([A-Z][A-Z0-9]{1,11})\b(?=\s*(?:on NSE|NSE ticker|NSE:?))/i);
-    if (nse) return `${nse[1].toUpperCase()}${hint === "NSE" ? ".NS" : ""}`;
-
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,7 +338,7 @@ async function resolveSymbolViaWeb(companyName, exchange = null) {
 
 /**
  * Fetch comprehensive financial data.
- * Priority: FMP → Yahoo Finance → Alpha Vantage
+ * Priority: Polygon.io → Tavily scrape → Alpha Vantage
  *
  * @param {string}      ticker
  * @param {string|null} exchange
@@ -388,39 +348,31 @@ async function resolveSymbolViaWeb(companyName, exchange = null) {
 export async function fetchFinancialData(ticker, exchange = null, companyName = null) {
   if (!ticker && !companyName) return null;
 
-  // Build the list of symbols to try (bare + exchange-suffixed variants)
-  let symbolsToTry = buildYahooSymbols(ticker, exchange);
+  const symbolsToTry = buildYahooSymbols(ticker, exchange);
 
-  // Auto-add Indian suffixes when the company name looks Indian
-  if (ticker && !ticker.includes(".") && companyName && INDIAN_COMPANY_RE.test(companyName)) {
+  // Auto-add Indian suffixes for known Indian company names
+  if (ticker && !ticker.includes(".") && companyName && INDIAN_NAME_RE.test(companyName)) {
     const upper = ticker.toUpperCase();
     if (!symbolsToTry.includes(`${upper}.NS`)) symbolsToTry.push(`${upper}.NS`);
     if (!symbolsToTry.includes(`${upper}.BO`)) symbolsToTry.push(`${upper}.BO`);
   }
 
-  // ── 1. Financial Modeling Prep (primary — no IP blocks, rich data) ──
-  const fmpData = await fetchFromFmp(ticker, companyName, symbolsToTry);
-  if (fmpData) return fmpData;
+  const bareSymbol = symbolsToTry[0]; // plain ticker without suffix
 
-  // ── 2. Yahoo Finance (works locally; blocked on most cloud IPs) ──
-  for (const symbol of symbolsToTry) {
-    const data = await fetchQuoteSummary(symbol);
-    if (data) return data;
+  // ── 1. Polygon.io (US stocks, free, no IP blocks) ──
+  if (bareSymbol && !bareSymbol.includes(".")) {
+    const polygonData = await fetchFromPolygon(bareSymbol);
+    if (polygonData) return polygonData;
   }
 
-  // ── 3. Resolve symbol from web then retry FMP + Yahoo ──
-  if (companyName) {
-    const webSymbol = await resolveSymbolViaWeb(companyName, exchange);
-    if (webSymbol && !symbolsToTry.includes(webSymbol)) {
-      const fmpData2 = await fetchFromFmp(ticker, companyName, [webSymbol]);
-      if (fmpData2) return fmpData2;
-
-      const yahooData = await fetchQuoteSummary(webSymbol);
-      if (yahooData) return yahooData;
-    }
+  // ── 2. Tavily financial scrape (works everywhere, global coverage) ──
+  const name = companyName ?? ticker;
+  if (name) {
+    const tavilyData = await fetchFromTavily(name, ticker, exchange);
+    if (tavilyData) return tavilyData;
   }
 
-  // ── 4. Alpha Vantage (last resort — 25 req/day) ──
+  // ── 3. Alpha Vantage (last resort — 25 req/day) ──
   for (const symbol of symbolsToTry) {
     const avData = await fetchFromAlphaVantage(symbol);
     if (avData) return avData;
