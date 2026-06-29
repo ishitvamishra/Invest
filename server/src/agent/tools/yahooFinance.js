@@ -15,20 +15,23 @@ function getFmpKeys() {
 
 /**
  * Fetch a full quote + profile from FMP for a given ticker.
- * Uses /v3/quote/:symbol and /v3/profile/:symbol endpoints.
+ * Uses the new /stable/ endpoints (free tier compatible).
  * @param {string} symbol
  * @param {string} apiKey
  * @returns {Promise<object|null>}
  */
 async function fetchFmpQuote(symbol, apiKey) {
   try {
+    // Use the new stable API base — /v3/ returns 403 on free tier
+    const BASE = "https://financialmodelingprep.com/stable";
+
     const [quoteRes, profileRes] = await Promise.all([
       fetch(
-        `https://financialmodelingprep.com/api/v3/quote/${encodeURIComponent(symbol)}?apikey=${apiKey}`,
+        `${BASE}/quote?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`,
         { signal: AbortSignal.timeout(10000) }
       ),
       fetch(
-        `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(symbol)}?apikey=${apiKey}`,
+        `${BASE}/profile?symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`,
         { signal: AbortSignal.timeout(10000) }
       ),
     ]);
@@ -43,7 +46,6 @@ async function fetchFmpQuote(symbol, apiKey) {
 
     // FMP returns an array; check for error objects
     if (!Array.isArray(quoteJson) || quoteJson.length === 0) {
-      // FMP returns {"Error Message": "..."} or {"message":"..."} on failure
       const msg = quoteJson?.["Error Message"] ?? quoteJson?.message ?? "";
       if (msg) console.warn(`[Finance] FMP error for ${symbol}: ${msg.slice(0, 120)}`);
       else console.warn(`[Finance] FMP empty response for ${symbol}`);
@@ -64,8 +66,9 @@ async function fetchFmpQuote(symbol, apiKey) {
       return null;
     }
 
-    // Detect currency from exchange/symbol suffix
-    const isIndian = symbol.endsWith(".NS") || symbol.endsWith(".BO") ||
+    const isIndian =
+      symbol.endsWith(".NS") ||
+      symbol.endsWith(".BO") ||
       (p.exchangeShortName ?? "").match(/NSE|BSE/i);
     const currency = p.currency ?? (isIndian ? "INR" : "USD");
 
@@ -86,8 +89,8 @@ async function fetchFmpQuote(symbol, apiKey) {
       profitMargin: safeNum(p.netIncomeRatio),
       week52High: safeNum(q.yearHigh),
       week52Low: safeNum(q.yearLow),
-      analystTargetPrice: safeNum(q.priceAvg50 ?? null), // FMP doesn't give analyst target on free tier
-      revenueGrowth: null, // not on free endpoint
+      analystTargetPrice: safeNum(q.priceAvg200 ?? null),
+      revenueGrowth: null,
       currency,
       shortName: p.companyName ?? q.name ?? symbol,
       yahooSymbol: symbol,
@@ -107,8 +110,9 @@ async function fetchFmpQuote(symbol, apiKey) {
  */
 async function searchFmpSymbol(companyName, apiKey) {
   try {
+    const BASE = "https://financialmodelingprep.com/stable";
     const res = await fetch(
-      `https://financialmodelingprep.com/api/v3/search?query=${encodeURIComponent(companyName)}&limit=10&apikey=${apiKey}`,
+      `${BASE}/search?query=${encodeURIComponent(companyName)}&limit=10&apikey=${apiKey}`,
       { signal: AbortSignal.timeout(8000) }
     );
     if (!res.ok) return null;
