@@ -34,9 +34,51 @@ const RAPIDAPI_HOST = "yahoo-finance15.p.rapidapi.com";
  * @param {string} apiKey
  * @returns {Promise<object|null>}
  */
+
+async function fetchRapidApiSupplemental(symbol, apiKey) {
+  try {
+    const res = await fetch(
+      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=financial-data,default-key-statistics`,
+      {
+        headers: {
+          "x-rapidapi-host": RAPIDAPI_HOST,
+          "x-rapidapi-key": apiKey,
+        },
+        signal: AbortSignal.timeout(12000),
+      }
+    );
+
+    if (!res.ok) return null;
+
+    const text = await res.text();
+    if (text.trimStart().startsWith("<")) return null;
+
+    const json = JSON.parse(text);
+    const body = json?.body ?? json?.data ?? json;
+
+    const fd = body?.financialData ?? {};
+    const ks = body?.defaultKeyStatistics ?? {};
+
+    const safeNum = (v) =>
+      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
+
+    // These objects have { raw, fmt } shape
+    const raw = (obj) => (typeof obj === "object" && obj !== null ? obj.raw ?? obj : obj);
+
+    return {
+      revenue:            safeNum(raw(fd.totalRevenue)),
+      netIncome:          safeNum(raw(fd.netIncomeToCommon) ?? raw(ks.netIncomeToCommon)),
+      debtToEquity:       safeNum(raw(fd.debtToEquity)),
+      profitMargin:       safeNum(raw(fd.profitMargins)),
+      analystTargetPrice: safeNum(raw(fd.targetMeanPrice)),
+      revenueGrowth:      safeNum(raw(fd.revenueGrowth)),
+    };
+  } catch {
+    return null;
+  }
+}
 async function fetchRapidApiQuote(symbol, apiKey) {
   try {
-    // Primary: /api/v2/markets/tickers?tickers=SYMBOL (returns array with full quote)
     const res = await fetch(
       `https://${RAPIDAPI_HOST}/api/v1/markets/stock/quotes?ticker=${encodeURIComponent(symbol)}`,
       {
@@ -54,9 +96,8 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     }
 
     const text = await res.text();
-    // Guard against HTML error pages
     if (text.trimStart().startsWith("<")) {
-      console.warn(`[Finance] RapidAPI returned HTML for ${symbol} — wrong endpoint or key issue`);
+      console.warn(`[Finance] RapidAPI returned HTML for ${symbol}`);
       return null;
     }
 
@@ -67,44 +108,29 @@ async function fetchRapidApiQuote(symbol, apiKey) {
       return null;
     }
 
-    // Response shape: { body: [{ ...quote fields }] } or { data: [...] }
     const items = json?.body ?? json?.data ?? json?.result ?? [];
     const q = Array.isArray(items) ? items[0] : items;
-    console.log(`[Finance] RAW Q for ${symbol}:`, JSON.stringify(q, null, 2));
+
     if (!q) {
       console.warn(`[Finance] RapidAPI empty body for ${symbol}`);
       return null;
     }
 
-  
-
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
-
-      // Add this helper near safeNum
-    const safeStr = (v) => {
-      if (v === undefined || v === null) return null;
-      const cleaned = String(v).replace(/[^0-9.-]/g, ""); // strip $, commas, spaces
-      const n = Number(cleaned);
-      return cleaned && !Number.isNaN(n) && n > 0 ? n : null;
-    };
-
-    // Try multiple price field names (API returns different field names)
-    const currentPrice =
-    safeNum(q.regularMarketPrice) ??
-    safeNum(q.price) ??
-    safeNum(q.currentPrice) ??
-    safeNum(q.lastPrice) ??
-    safeStr(q.lastsale) ??
-    safeNum(q.ask) ??
-    safeNum(q.bid) ??
-    safeNum(q.open);
-    
+    const currentPrice = safeNum(q.regularMarketPrice);
     if (!currentPrice) {
-      console.warn(`[Finance] RapidAPI no price for ${symbol}. Response keys: ${Object.keys(q).slice(0, 10).join(", ")}`);
+      console.warn(`[Finance] RapidAPI no price for ${symbol}`);
       return null;
     }
+
+    // Fetch supplemental data (revenue, netIncome, debtToEquity, analystTarget)
+    const extra = await fetchRapidApiSupplemental(symbol, apiKey);
+
+    // Parse analyst rating from "2.5 - Buy" format
+    const analystRatingRaw = q.averageAnalystRating ?? "";
+    const analystRatingScore = safeNum(analystRatingRaw.split(" - ")[0]);
 
     console.log(`[Finance] RapidAPI ✓ ${symbol} @ ${q.currency ?? "USD"} ${currentPrice}`);
 
@@ -113,18 +139,26 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     return {
       currentPrice,
       marketCap:          safeNum(q.marketCap),
-      peRatio:            safeNum(q.trailingPE ?? q.peRatio ?? q.pe),
-      eps:                safeNum(q.epsTrailingTwelveMonths ?? q.eps),
-      revenue:            safeNum(q.totalRevenue ?? q.revenue),
-      netIncome:          safeNum(q.netIncome),
-      debtToEquity:       safeNum(q.debtToEquity),
-      profitMargin:       safeNum(q.profitMargins ?? q.profitMargin),
-      week52High:         safeNum(q.fiftyTwoWeekHigh ?? q.week52High),
-      week52Low:          safeNum(q.fiftyTwoWeekLow ?? q.week52Low),
-      analystTargetPrice: safeNum(q.targetMeanPrice ?? q.analystTargetPrice),
-      revenueGrowth:      safeNum(q.revenueGrowth),
+      peRatio:            safeNum(q.trailingPE),
+      eps:                safeNum(q.epsTrailingTwelveMonths),
+      week52High:         safeNum(q.fiftyTwoWeekHigh),
+      week52Low:          safeNum(q.fiftyTwoWeekLow),
+      forwardPE:          safeNum(q.forwardPE),
+      priceToBook:        safeNum(q.priceToBook),
+      dividendYield:      safeNum(q.dividendYield),
+      fiftyDayAvg:        safeNum(q.fiftyDayAverage),
+      twoHundredDayAvg:   safeNum(q.twoHundredDayAverage),
+      analystRating:      analystRatingRaw || null,
+      analystRatingScore,
+      // From supplemental call
+      revenue:            extra?.revenue ?? null,
+      netIncome:          extra?.netIncome ?? null,
+      debtToEquity:       extra?.debtToEquity ?? null,
+      profitMargin:       extra?.profitMargin ?? null,
+      analystTargetPrice: extra?.analystTargetPrice ?? null,
+      revenueGrowth:      extra?.revenueGrowth ?? null,
       currency:           q.currency ?? (isIndian ? "INR" : "USD"),
-      shortName:          q.shortName ?? q.longName ?? q.displayName ?? symbol,
+      shortName:          q.displayName ?? q.shortName ?? q.longName ?? symbol,
       yahooSymbol:        symbol,
       source:             "rapidapi-yahoo",
     };
