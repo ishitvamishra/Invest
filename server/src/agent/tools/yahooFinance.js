@@ -85,6 +85,7 @@ async function fetchRapidApiQuote(symbol, apiKey) {
       q.price ?? 
       q.currentPrice ?? 
       q.lastPrice ??
+      q.lastsale ??
       q.ask ??
       q.bid ??
       q.open
