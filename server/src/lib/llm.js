@@ -50,7 +50,8 @@ function getGroqPool() {
   if (groqPool) return groqPool;
   groqPool = getEnvKeys("GROQ_API_KEY").map(
     (apiKey) =>
-      new ChatGroq({ model: "llama-3.3-70b-versatile", temperature: 0.2, apiKey })
+      // llama-3.1-8b-instant: 500k TPD vs 100k for versatile — much better for free tier
+      new ChatGroq({ model: "llama-3.1-8b-instant", temperature: 0.2, apiKey })
   );
   return groqPool;
 }
@@ -61,8 +62,9 @@ function getGeminiPool() {
     .filter((k) => matchesKeyFormat(k, /^(AIza|AQ\.)/))
     .map(
       (apiKey) =>
+        // gemini-1.5-flash: 1500 RPD vs 250 for 2.5-flash on free tier
         new ChatGoogleGenerativeAI({
-          model: "gemini-2.5-flash",
+          model: "gemini-1.5-flash",
           temperature: 0.3,
           maxOutputTokens: 8192,
           json: true,
@@ -76,8 +78,9 @@ function getCerebrasPool() {
   if (cerebrasPool) return cerebrasPool;
   cerebrasPool = getEnvKeys("CEREBRAS_API_KEY").map(
     (apiKey) =>
+      // llama3.3-70b is the current model (llama3.1-70b was removed → 404)
       new ChatOpenAI({
-        model: "llama3.1-70b",
+        model: "llama3.3-70b",
         temperature: 0.3,
         apiKey,
         configuration: {
