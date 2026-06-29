@@ -1,9 +1,9 @@
 /**
- * Financial data fetcher — cloud-safe priority chain:
+ * Financial data fetcher — priority chain:
  *
- *  1. Polygon.io     — free tier, no IP blocks, great for US/global stocks
- *  2. Tavily scrape  — extracts financials from web results (works everywhere)
- *  3. Alpha Vantage  — last resort, 25 req/day free
+ *  1. RapidAPI Yahoo Finance  — real Yahoo Finance data, no IP blocks, free tier 500 req/month
+ *  2. Polygon.io              — price-only fallback for US stocks
+ *  3. Alpha Vantage           — last resort, 25 req/day
  */
 
 import { searchTavily } from "./tavilySearch.js";
@@ -20,77 +20,197 @@ function getKeys(baseName) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Polygon.io  (free tier — unlimited EOD, 5 req/min, no IP blocks)
-//    Sign up free at: https://polygon.io/
+// 1. RapidAPI Yahoo Finance
+//    Subscribe free at: https://rapidapi.com/sparior/api/yahoo-finance15
+//    Env var: RAPIDAPI_KEY, RAPIDAPI_KEY_1, RAPIDAPI_KEY_2 ...
 // ─────────────────────────────────────────────────────────────────────────────
 
+const RAPIDAPI_HOST = "yahoo-finance15.p.rapidapi.com";
+
 /**
- * Fetch quote + details from Polygon for a US ticker.
- * Uses /v2/aggs/ticker/:ticker/prev (free tier compatible — previous close)
- * and /v3/reference/tickers/:ticker for company details.
- * @param {string} symbol  Plain US ticker, e.g. "AAPL", "CRM"
+ * Fetch full quote summary from RapidAPI Yahoo Finance.
+ * @param {string} symbol   e.g. "AAPL", "RELIANCE.NS"
  * @param {string} apiKey
  * @returns {Promise<object|null>}
  */
-async function fetchPolygonData(symbol, apiKey) {
-  // Polygon only covers US-listed tickers — skip Indian suffixes
-  if (symbol.includes(".")) return null;
-
+async function fetchRapidApiQuote(symbol, apiKey) {
   try {
-    const [prevRes, detailRes] = await Promise.all([
-      fetch(
-        `https://api.polygon.io/v2/aggs/ticker/${encodeURIComponent(symbol)}/prev?adjusted=true&apiKey=${apiKey}`,
-        { signal: AbortSignal.timeout(10000) }
-      ),
-      fetch(
-        `https://api.polygon.io/v3/reference/tickers/${encodeURIComponent(symbol)}?apiKey=${apiKey}`,
-        { signal: AbortSignal.timeout(10000) }
-      ),
-    ]);
+    const res = await fetch(
+      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=financial-data,default-key-statistics,summary-detail,price`,
+      {
+        headers: {
+          "x-rapidapi-host": RAPIDAPI_HOST,
+          "x-rapidapi-key": apiKey,
+        },
+        signal: AbortSignal.timeout(12000),
+      }
+    );
 
-    if (!prevRes.ok) {
-      if (prevRes.status === 429) console.warn(`[Finance] Polygon rate-limited for ${symbol}`);
-      else console.warn(`[Finance] Polygon HTTP ${prevRes.status} for ${symbol}`);
+    if (!res.ok) {
+      console.warn(`[Finance] RapidAPI HTTP ${res.status} for ${symbol}`);
       return null;
     }
 
-    const prevJson = await prevRes.json();
-    const detailJson = detailRes.ok ? await detailRes.json() : {};
+    const json = await res.json();
 
-    // /v2/aggs returns { results: [{ c, h, l, o, v, ... }] }
-    const bar = prevJson?.results?.[0];
-    const details = detailJson?.results ?? {};
+    // Check for API-level errors
+    if (json?.message || json?.error) {
+      console.warn(`[Finance] RapidAPI error for ${symbol}: ${(json.message ?? json.error ?? "").slice(0, 120)}`);
+      return null;
+    }
+
+    const body = json?.body ?? json;
+    const price         = body?.price ?? {};
+    const summaryDetail = body?.summaryDetail ?? {};
+    const financialData = body?.financialData ?? {};
+    const keyStats      = body?.defaultKeyStatistics ?? {};
 
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
-    const currentPrice = safeNum(bar?.c); // closing price
-    const marketCap = safeNum(details.market_cap);
+    // RapidAPI wraps values in { raw, fmt } objects
+    const raw = (obj) => (typeof obj === "object" && obj !== null ? obj.raw ?? obj : obj);
+
+    const currentPrice = safeNum(raw(price.regularMarketPrice));
+    const marketCap    = safeNum(raw(price.marketCap ?? summaryDetail.marketCap));
 
     if (!currentPrice) {
-      console.warn(`[Finance] Polygon no price for ${symbol}`);
+      console.warn(`[Finance] RapidAPI no price for ${symbol}`);
       return null;
     }
 
-    console.log(`[Finance] Polygon ✓ ${symbol} @ $${currentPrice}`);
+    console.log(`[Finance] RapidAPI ✓ ${symbol} @ ${raw(price.currency) ?? "USD"} ${currentPrice}`);
 
     return {
       currentPrice,
       marketCap,
-      peRatio: null,
-      eps: null,
-      revenue: null,
-      netIncome: null,
-      debtToEquity: null,
-      profitMargin: null,
-      week52High: safeNum(details.week_52_high ?? null),
-      week52Low: safeNum(details.week_52_low ?? null),
-      analystTargetPrice: null,
-      revenueGrowth: null,
-      currency: "USD",
-      shortName: details.name ?? symbol,
-      yahooSymbol: symbol,
-      source: "polygon",
+      peRatio:            safeNum(raw(summaryDetail.trailingPE ?? keyStats.trailingPE)),
+      eps:                safeNum(raw(keyStats.trailingEps)),
+      revenue:            safeNum(raw(financialData.totalRevenue)),
+      netIncome:          safeNum(
+        raw(financialData.profitMargins) != null && raw(financialData.totalRevenue) != null
+          ? raw(financialData.totalRevenue) * raw(financialData.profitMargins)
+          : null
+      ),
+      debtToEquity:       safeNum(raw(financialData.debtToEquity)),
+      profitMargin:       safeNum(raw(financialData.profitMargins)),
+      week52High:         safeNum(raw(summaryDetail.fiftyTwoWeekHigh)),
+      week52Low:          safeNum(raw(summaryDetail.fiftyTwoWeekLow)),
+      analystTargetPrice: safeNum(raw(financialData.targetMeanPrice)),
+      revenueGrowth:      safeNum(raw(financialData.revenueGrowth)),
+      currency:           raw(price.currency) ?? (symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD"),
+      shortName:          raw(price.shortName) ?? raw(price.longName) ?? symbol,
+      yahooSymbol:        symbol,
+      source:             "rapidapi-yahoo",
+    };
+  } catch (err) {
+    console.warn(`[Finance] RapidAPI exception for ${symbol}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Search for a symbol using RapidAPI Yahoo Finance search endpoint.
+ * @param {string} query
+ * @param {string} apiKey
+ * @returns {Promise<string|null>}
+ */
+async function searchRapidApiSymbol(query, apiKey) {
+  try {
+    const res = await fetch(
+      `https://${RAPIDAPI_HOST}/api/v1/markets/search?search=${encodeURIComponent(query)}`,
+      {
+        headers: {
+          "x-rapidapi-host": RAPIDAPI_HOST,
+          "x-rapidapi-key": apiKey,
+        },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const quotes = json?.body?.quotes ?? json?.quotes ?? [];
+    if (!Array.isArray(quotes) || quotes.length === 0) return null;
+
+    const queryLower = query.toLowerCase();
+    // Prefer equity type, prefer name match
+    const equities = quotes.filter((q) => q.quoteType === "EQUITY" || !q.quoteType);
+    const match =
+      equities.find((q) =>
+        (q.shortname ?? q.longname ?? "").toLowerCase().includes(queryLower)
+      ) ?? equities[0];
+
+    return match?.symbol ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try all RapidAPI keys for a list of symbols.
+ */
+async function fetchFromRapidApi(symbolsToTry, companyName) {
+  const keys = getKeys("RAPIDAPI_KEY");
+  if (keys.length === 0) {
+    console.warn("[Finance] RapidAPI skipped — no RAPIDAPI_KEY env vars found");
+    return null;
+  }
+
+  console.log(`[Finance] RapidAPI trying ${symbolsToTry.join(", ")} with ${keys.length} key(s)`);
+
+  for (const symbol of symbolsToTry) {
+    for (const key of keys) {
+      const data = await fetchRapidApiQuote(symbol, key);
+      if (data) return data;
+    }
+  }
+
+  // Try searching by company name if direct symbol lookups all failed
+  if (companyName) {
+    const firstKey = keys[0];
+    const found = await searchRapidApiSymbol(companyName, firstKey);
+    if (found && !symbolsToTry.includes(found)) {
+      console.log(`[Finance] RapidAPI search found: ${found}`);
+      for (const key of keys) {
+        const data = await fetchRapidApiQuote(found, key);
+        if (data) return data;
+      }
+    }
+  }
+
+  console.warn(`[Finance] RapidAPI all attempts failed`);
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Polygon.io  (price-only fallback for US stocks — free tier)
+//    Sign up free at: https://polygon.io/
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fetchPolygonData(symbol, apiKey) {
+  if (symbol.includes(".")) return null;
+  try {
+    const res = await fetch(
+      `https://api.polygon.io/v2/aggs/ticker/${encodeURIComponent(symbol)}/prev?adjusted=true&apiKey=${apiKey}`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) {
+      console.warn(`[Finance] Polygon HTTP ${res.status} for ${symbol}`);
+      return null;
+    }
+    const json = await res.json();
+    const bar = json?.results?.[0];
+    const price = bar?.c ? Number(bar.c) : null;
+    if (!price) return null;
+    console.log(`[Finance] Polygon ✓ ${symbol} @ $${price}`);
+    return {
+      currentPrice: price,
+      marketCap: null, peRatio: null, eps: null, revenue: null,
+      netIncome: null, debtToEquity: null, profitMargin: null,
+      week52High: null, week52Low: null, analystTargetPrice: null,
+      revenueGrowth: null, currency: "USD",
+      shortName: symbol, yahooSymbol: symbol, source: "polygon",
     };
   } catch (err) {
     console.warn(`[Finance] Polygon exception for ${symbol}: ${err.message}`);
@@ -100,170 +220,12 @@ async function fetchPolygonData(symbol, apiKey) {
 
 async function fetchFromPolygon(symbol) {
   const keys = getKeys("POLYGON_API_KEY");
-  if (keys.length === 0) {
-    console.warn("[Finance] Polygon skipped — no POLYGON_API_KEY env vars");
-    return null;
-  }
-  console.log(`[Finance] Polygon trying ${symbol} with ${keys.length} key(s)`);
+  if (keys.length === 0) return null;
   for (const key of keys) {
     const data = await fetchPolygonData(symbol, key);
     if (data) return data;
   }
-  console.warn(`[Finance] Polygon all key(s) failed for ${symbol}`);
   return null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. Tavily financial scrape  (works everywhere, extracts from web results)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Extract a numeric value from text using multiple regex patterns.
- * @param {string} text
- * @param {RegExp[]} patterns
- * @returns {number|null}
- */
-function extractNum(text, patterns) {
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m) {
-      // Handle B/M/T/K suffixes
-      let v = parseFloat(m[1].replace(/,/g, ""));
-      const suffix = (m[2] ?? "").toUpperCase();
-      if (suffix === "T") v *= 1e12;
-      else if (suffix === "B") v *= 1e9;
-      else if (suffix === "M") v *= 1e6;
-      else if (suffix === "K") v *= 1e3;
-      if (!Number.isNaN(v) && v > 0) return v;
-    }
-  }
-  return null;
-}
-
-/**
- * Scrape financial metrics from Tavily search results.
- * @param {string} companyName
- * @param {string|null} ticker
- * @param {string|null} exchange
- * @returns {Promise<object|null>}
- */
-async function fetchFromTavily(companyName, ticker, exchange) {
-  try {
-    const isIndian =
-      (exchange ?? "").toUpperCase().match(/NSE|BSE|INDIA/) ||
-      ticker?.endsWith(".NS") ||
-      ticker?.endsWith(".BO");
-
-    const sym = ticker?.replace(/\.(NS|BO|L|T)$/, "") ?? companyName;
-
-    const queries = [
-      `${sym} stock price PE ratio EPS market cap revenue profit margin`,
-      `${companyName} financial data 52 week high low earnings per share`,
-    ];
-
-    const allResults = [];
-    for (const q of queries) {
-      const results = await searchTavily(q, 6);
-      allResults.push(...results);
-    }
-
-    if (allResults.length === 0) return null;
-
-    const corpus = allResults
-      .map((r) => `${r.title} ${r.snippet}`)
-      .join(" ");
-
-    console.log(`[Finance] Tavily scraping financials for ${companyName}`);
-
-    // Price — look for explicit stock price mentions
-    const price = extractNum(corpus, [
-      /(?:stock price|share price|trading at|last price|current price)[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /[$₹]\s*([\d,]+\.?\d*)\s*(B|M|K)?(?:\s*(?:per share|USD|INR))/i,
-      /(?:closed?|close) (?:at )?[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // Market cap
-    const marketCap = extractNum(corpus, [
-      /market cap(?:itali[sz]ation)?[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
-      /mkt\.?\s*cap[^$₹\d]{0,10}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
-    ]);
-
-    // P/E ratio
-    const peRatio = extractNum(corpus, [
-      /(?:p\/e|price.to.earnings|trailing p\/e|forward p\/e)[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /pe\s+ratio[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // EPS
-    const eps = extractNum(corpus, [
-      /(?:eps|earnings per share)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /(?:ttm eps|diluted eps)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // Revenue
-    const revenue = extractNum(corpus, [
-      /(?:total revenue|annual revenue|revenue)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(T|B|M|K)/i,
-    ]);
-
-    // Profit margin — extract as percentage, store as decimal
-    const profitMarginPct = extractNum(corpus, [
-      /(?:profit margin|net margin|net profit margin)[^\d]{0,6}([\d,]+\.?\d*)\s*%/i,
-    ]);
-
-    // 52-week high/low
-    const week52High = extractNum(corpus, [
-      /52.?w(?:eek)?\s*h(?:igh)?[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /(?:year high|yearly high)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    const week52Low = extractNum(corpus, [
-      /52.?w(?:eek)?\s*l(?:ow)?[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /(?:year low|yearly low)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // Analyst target price
-    const analystTarget = extractNum(corpus, [
-      /(?:analyst|price) target[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-      /(?:target price|consensus target)[^\d$₹]{0,6}[$₹]?\s*([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // Debt to equity
-    const debtToEquity = extractNum(corpus, [
-      /(?:debt.to.equity|d\/e ratio)[^\d]{0,6}([\d,]+\.?\d*)\s*(B|M|K)?/i,
-    ]);
-
-    // Need at least price or market cap
-    if (!price && !marketCap) {
-      console.warn(`[Finance] Tavily scrape: no price/mktcap found for ${companyName}`);
-      return null;
-    }
-
-    const profitMargin = profitMarginPct ? profitMarginPct / 100 : null;
-    const currency = isIndian ? "INR" : "USD";
-    console.log(`[Finance] Tavily ✓ ${companyName} — price:${price} mktcap:${marketCap} pe:${peRatio} eps:${eps}`);
-
-    return {
-      currentPrice: price,
-      marketCap,
-      peRatio,
-      eps,
-      revenue,
-      netIncome: revenue && profitMargin ? revenue * profitMargin : null,
-      debtToEquity,
-      profitMargin,
-      week52High,
-      week52Low,
-      analystTargetPrice: analystTarget,
-      revenueGrowth: null,
-      currency,
-      shortName: companyName,
-      yahooSymbol: ticker ?? companyName,
-      source: "tavily",
-    };
-  } catch (err) {
-    console.warn(`[Finance] Tavily scrape error: ${err.message}`);
-    return null;
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,9 +257,7 @@ async function fetchAlphaVantageQuote(symbol, apiKey) {
       week52Low: parseFloat(q["04. low"]) || null,
       analystTargetPrice: null, revenueGrowth: null,
       currency: symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD",
-      shortName: symbol,
-      yahooSymbol: symbol,
-      source: "alphavantage",
+      shortName: symbol, yahooSymbol: symbol, source: "alphavantage",
     };
   } catch { return null; }
 }
@@ -344,12 +304,31 @@ export function buildYahooSymbols(ticker, exchange = null) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Resolve ticker from web when all direct lookups fail
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function resolveSymbolViaWeb(companyName, exchange) {
+  try {
+    const hint = (exchange ?? "").toUpperCase().includes("NSE") ? "NSE" : "stock";
+    const results = await searchTavily(
+      `${companyName} ${hint} ticker symbol yahoo finance`, 5
+    );
+    const corpus = results.map((r) => `${r.title} ${r.snippet}`).join(" ");
+    const dotted = corpus.match(/\b([A-Z][A-Z0-9]{1,11})\.(NS|BO|L|TO|AX)\b/);
+    if (dotted) return `${dotted[1]}.${dotted[2]}`;
+    const nse = corpus.match(/\b([A-Z][A-Z0-9]{1,11})\b(?=\s*(?:on NSE|NSE ticker|NSE:?))/i);
+    if (nse) return `${nse[1].toUpperCase()}${hint === "NSE" ? ".NS" : ""}`;
+    return null;
+  } catch { return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Fetch comprehensive financial data.
- * Priority: Polygon.io → Tavily scrape → Alpha Vantage
+ * Priority: RapidAPI Yahoo Finance → Polygon.io → Alpha Vantage
  *
  * @param {string}      ticker
  * @param {string|null} exchange
@@ -359,7 +338,7 @@ export function buildYahooSymbols(ticker, exchange = null) {
 export async function fetchFinancialData(ticker, exchange = null, companyName = null) {
   if (!ticker && !companyName) return null;
 
-  const symbolsToTry = buildYahooSymbols(ticker, exchange);
+  let symbolsToTry = buildYahooSymbols(ticker, exchange);
 
   // Auto-add Indian suffixes for known Indian company names
   if (ticker && !ticker.includes(".") && companyName && INDIAN_NAME_RE.test(companyName)) {
@@ -368,39 +347,28 @@ export async function fetchFinancialData(ticker, exchange = null, companyName = 
     if (!symbolsToTry.includes(`${upper}.BO`)) symbolsToTry.push(`${upper}.BO`);
   }
 
-  const bareSymbol = symbolsToTry[0]; // plain ticker without suffix
+  // ── 1. RapidAPI Yahoo Finance (primary — full data, no IP blocks) ──
+  const rapidData = await fetchFromRapidApi(symbolsToTry, companyName);
+  if (rapidData) return rapidData;
 
-  // ── 1. Polygon.io (US stocks, free, no IP blocks) — price only ──
-  let baseData = null;
-  if (bareSymbol && !bareSymbol.includes(".")) {
-    baseData = await fetchFromPolygon(bareSymbol);
-  }
-
-  // ── 2. Tavily financial scrape — always run to get fundamentals ──
-  //    If Polygon gave us a price, Tavily enriches with P/E, EPS, margins etc.
-  //    If Polygon failed, Tavily is the primary source.
-  const name = companyName ?? ticker;
-  if (name) {
-    const tavilyData = await fetchFromTavily(name, ticker, exchange);
-    if (tavilyData) {
-      if (baseData) {
-        // Merge: keep Polygon price (more accurate), fill nulls from Tavily
-        return {
-          ...tavilyData,
-          currentPrice: baseData.currentPrice ?? tavilyData.currentPrice,
-          marketCap:    baseData.marketCap    ?? tavilyData.marketCap,
-          shortName:    baseData.shortName    ?? tavilyData.shortName,
-          source: "polygon+tavily",
-        };
-      }
-      return tavilyData;
+  // ── 2. Try resolving symbol from web then retry RapidAPI ──
+  if (companyName) {
+    const webSymbol = await resolveSymbolViaWeb(companyName, exchange);
+    if (webSymbol && !symbolsToTry.includes(webSymbol)) {
+      symbolsToTry.push(webSymbol);
+      const rapidData2 = await fetchFromRapidApi([webSymbol], companyName);
+      if (rapidData2) return rapidData2;
     }
   }
 
-  // If Polygon succeeded but Tavily found nothing, return Polygon data as-is
-  if (baseData) return baseData;
+  // ── 3. Polygon.io (price-only, US stocks) ──
+  const bareSymbol = symbolsToTry.find((s) => !s.includes("."));
+  if (bareSymbol) {
+    const polygonData = await fetchFromPolygon(bareSymbol);
+    if (polygonData) return polygonData;
+  }
 
-  // ── 3. Alpha Vantage (last resort — 25 req/day) ──
+  // ── 4. Alpha Vantage (last resort) ──
   for (const symbol of symbolsToTry) {
     const avData = await fetchFromAlphaVantage(symbol);
     if (avData) return avData;
