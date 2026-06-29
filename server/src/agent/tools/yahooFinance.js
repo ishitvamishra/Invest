@@ -28,34 +28,52 @@ async function fetchAlphaVantageQuote(symbol, apiKey) {
       `https://www.alphavantage.co/query?function=GLOBAL_QUOTE` +
       `&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
 
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return null;
+    console.log(`[Finance] AV → fetching ${symbol}`);
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+
+    if (!res.ok) {
+      console.warn(`[Finance] AV HTTP ${res.status} for ${symbol}`);
+      return null;
+    }
 
     const json = await res.json();
 
-    // Rate-limited or bad key
-    if (json["Note"] || json["Information"] || json["Error Message"]) {
+    // Rate-limited or bad key — log the actual message so it shows in Render logs
+    if (json["Note"]) {
+      console.warn(`[Finance] AV rate-limited: ${json["Note"].slice(0, 120)}`);
+      return null;
+    }
+    if (json["Information"]) {
+      console.warn(`[Finance] AV info/limit: ${json["Information"].slice(0, 120)}`);
+      return null;
+    }
+    if (json["Error Message"]) {
+      console.warn(`[Finance] AV error: ${json["Error Message"].slice(0, 120)}`);
       return null;
     }
 
     const q = json["Global Quote"];
-    if (!q || !q["05. price"]) return null;
+    if (!q || !q["05. price"]) {
+      console.warn(`[Finance] AV empty response for ${symbol}:`, JSON.stringify(json).slice(0, 200));
+      return null;
+    }
 
     const price = parseFloat(q["05. price"]);
-    const prevClose = parseFloat(q["08. previous close"]);
-
-    if (!price) return null;
+    if (!price) {
+      console.warn(`[Finance] AV price=0 for ${symbol}`);
+      return null;
+    }
 
     return {
       currentPrice: price,
-      marketCap: null,          // AV GLOBAL_QUOTE doesn't include market cap
+      marketCap: null,
       peRatio: null,
       eps: null,
       revenue: null,
       netIncome: null,
       debtToEquity: null,
       profitMargin: null,
-      week52High: parseFloat(q["03. high"]) || null,  // daily high, not 52w
+      week52High: parseFloat(q["03. high"]) || null,
       week52Low: parseFloat(q["04. low"]) || null,
       analystTargetPrice: null,
       revenueGrowth: null,
@@ -64,7 +82,8 @@ async function fetchAlphaVantageQuote(symbol, apiKey) {
       yahooSymbol: symbol,
       source: "alphavantage",
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[Finance] AV exception for ${symbol}:`, err.message);
     return null;
   }
 }
@@ -76,15 +95,20 @@ async function fetchAlphaVantageQuote(symbol, apiKey) {
  */
 async function fetchFromAlphaVantage(symbol) {
   const keys = getAlphaVantageKeys();
-  if (keys.length === 0) return null;
+  if (keys.length === 0) {
+    console.warn(`[Finance] AV skipped — no ALPHA_VANTAGE_KEY env vars found`);
+    return null;
+  }
 
+  console.log(`[Finance] AV trying ${symbol} with ${keys.length} key(s)`);
   for (const key of keys) {
     const data = await fetchAlphaVantageQuote(symbol, key);
     if (data) {
-      console.log(`[Finance] Alpha Vantage ✓ (${symbol})`);
+      console.log(`[Finance] AV ✓ ${symbol} @ $${data.currentPrice}`);
       return data;
     }
   }
+  console.warn(`[Finance] AV all ${keys.length} key(s) failed for ${symbol}`);
   return null;
 }
 

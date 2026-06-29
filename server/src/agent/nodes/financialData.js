@@ -29,7 +29,7 @@ export async function financialDataNode(state, config) {
       };
     }
 
-    emit("tool_call", `Yahoo Finance: quoteSummary(${state.ticker})`);
+    emit("tool_call", `Fetching financial data: ${state.ticker}`);
 
     const financialData = await fetchFinancialData(
       state.ticker,
@@ -38,7 +38,8 @@ export async function financialDataNode(state, config) {
     );
 
     if (financialData) {
-      emit("node_complete", `Financial data retrieved for ${state.ticker}`, {
+      const source = financialData.source === "alphavantage" ? "Alpha Vantage" : "Yahoo Finance";
+      emit("node_complete", `Financial data retrieved (${source}) for ${state.ticker}`, {
         marketCap: financialData.marketCap,
         peRatio: financialData.peRatio,
       });
