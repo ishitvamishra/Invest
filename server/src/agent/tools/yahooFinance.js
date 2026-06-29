@@ -76,20 +76,30 @@ async function fetchRapidApiQuote(symbol, apiKey) {
       return null;
     }
 
+  
+
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
+
+      // Add this helper near safeNum
+    const safeStr = (v) => {
+      if (v === undefined || v === null) return null;
+      const cleaned = String(v).replace(/[^0-9.-]/g, ""); // strip $, commas, spaces
+      const n = Number(cleaned);
+      return cleaned && !Number.isNaN(n) && n > 0 ? n : null;
+    };
+
     // Try multiple price field names (API returns different field names)
-    const currentPrice = safeNum(
-      q.regularMarketPrice ?? 
-      q.price ?? 
-      q.currentPrice ?? 
-      q.lastPrice ??
-      q.lastsale ??
-      q.ask ??
-      q.bid ??
-      q.open
-    );
+    const currentPrice =
+    safeNum(q.regularMarketPrice) ??
+    safeNum(q.price) ??
+    safeNum(q.currentPrice) ??
+    safeNum(q.lastPrice) ??
+    safeStr(q.lastsale) ??
+    safeNum(q.ask) ??
+    safeNum(q.bid) ??
+    safeNum(q.open);
     
     if (!currentPrice) {
       console.warn(`[Finance] RapidAPI no price for ${symbol}. Response keys: ${Object.keys(q).slice(0, 10).join(", ")}`);
