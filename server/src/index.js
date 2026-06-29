@@ -24,14 +24,27 @@ if (missingProviders.length > 0) {
 }
 const app = express();
 const PORT = process.env.PORT || 8000;
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+// Support comma-separated list of allowed origins, e.g.:
+// CLIENT_URL=http://localhost:5173,https://invest-seven-delta.vercel.app
+const rawOrigins = process.env.CLIENT_URL || "http://localhost:5173";
+const ALLOWED_ORIGINS = rawOrigins.split(",").map((o) => o.trim()).filter(Boolean);
 
 app.use(
   cors({
-    origin: CLIENT_URL,
+    origin: (origin, callback) => {
+      // Allow server-to-server requests (no origin) and listed origins
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+      }
+    },
     credentials: true,
   })
 );
+
+console.log(`[CORS] Allowed origins: ${ALLOWED_ORIGINS.join(", ")}`);
 app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
@@ -49,5 +62,4 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Investment Research Agent server running on http://localhost:${PORT}`);
-  console.log(`CORS enabled for: ${CLIENT_URL}`);
 });
