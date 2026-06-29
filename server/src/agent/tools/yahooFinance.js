@@ -43,6 +43,7 @@ export function buildYahooSymbols(ticker, exchange = null) {
 
   symbols.add(upper);
 
+  // If the ticker already has an exchange suffix, use it as-is
   if (upper.includes(".")) {
     return [...symbols];
   }
@@ -51,14 +52,25 @@ export function buildYahooSymbols(ticker, exchange = null) {
     .toUpperCase()
     .replace(/[^A-Z]/g, "");
 
+  // Add exchange-specific suffix if hint matches a known exchange
   for (const [key, suffix] of Object.entries(EXCHANGE_SUFFIX)) {
     if (exchangeKey.includes(key)) {
       symbols.add(`${upper}${suffix}`);
     }
   }
 
-  symbols.add(`${upper}.NS`);
-  symbols.add(`${upper}.BO`);
+  // Only add Indian suffixes (.NS/.BO) when there is an Indian exchange hint.
+  // Adding them unconditionally causes US tickers (AAPL, AMZN, etc.) to fail
+  // every variant because Yahoo Finance has no AAPL.NS or AAPL.BO listing.
+  const isIndianHint = exchangeKey.includes("NSE") ||
+    exchangeKey.includes("BSE") ||
+    exchangeKey.includes("INDIA") ||
+    exchangeKey.includes("BOMBAY");
+
+  if (isIndianHint) {
+    symbols.add(`${upper}.NS`);
+    symbols.add(`${upper}.BO`);
+  }
 
   return [...symbols];
 }
