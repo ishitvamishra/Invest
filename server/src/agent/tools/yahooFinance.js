@@ -79,9 +79,19 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
-    const currentPrice = safeNum(q.regularMarketPrice ?? q.price ?? q.currentPrice);
+    // Try multiple price field names (API returns different field names)
+    const currentPrice = safeNum(
+      q.regularMarketPrice ?? 
+      q.price ?? 
+      q.currentPrice ?? 
+      q.lastPrice ??
+      q.ask ??
+      q.bid ??
+      q.open
+    );
+    
     if (!currentPrice) {
-      console.warn(`[Finance] RapidAPI no price for ${symbol}`);
+      console.warn(`[Finance] RapidAPI no price for ${symbol}. Response keys: ${Object.keys(q).slice(0, 10).join(", ")}`);
       return null;
     }
 
@@ -226,7 +236,11 @@ async function fetchPolygonData(symbol, apiKey) {
 
 async function fetchFromPolygon(symbol) {
   const keys = getKeys("POLYGON_API_KEY");
-  if (keys.length === 0) return null;
+  if (keys.length === 0) {
+    console.log("[Finance] Polygon skipped — no POLYGON_API_KEY env vars found");
+    return null;
+  }
+  console.log(`[Finance] Polygon trying ${symbol} with ${keys.length} key(s)`);
   for (const key of keys) {
     const data = await fetchPolygonData(symbol, key);
     if (data) return data;
@@ -270,7 +284,11 @@ async function fetchAlphaVantageQuote(symbol, apiKey) {
 
 async function fetchFromAlphaVantage(symbol) {
   const keys = getKeys("ALPHA_VANTAGE_KEY");
-  if (keys.length === 0) return null;
+  if (keys.length === 0) {
+    console.log("[Finance] AlphaVantage skipped — no ALPHA_VANTAGE_KEY env vars found");
+    return null;
+  }
+  console.log(`[Finance] AlphaVantage trying ${symbol} with ${keys.length} key(s)`);
   for (const key of keys) {
     const data = await fetchAlphaVantageQuote(symbol, key);
     if (data) return data;
@@ -361,6 +379,7 @@ export async function fetchFinancialData(ticker, exchange = null, companyName = 
   if (companyName) {
     const webSymbol = await resolveSymbolViaWeb(companyName, exchange);
     if (webSymbol && !symbolsToTry.includes(webSymbol)) {
+      console.log(`[Finance] Resolved symbol via web: ${webSymbol}`);
       symbolsToTry.push(webSymbol);
       const rapidData2 = await fetchFromRapidApi([webSymbol], companyName);
       if (rapidData2) return rapidData2;
