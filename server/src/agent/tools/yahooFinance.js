@@ -29,14 +29,16 @@ const RAPIDAPI_HOST = "yahoo-finance15.p.rapidapi.com";
 
 /**
  * Fetch full quote summary from RapidAPI Yahoo Finance.
+ * Uses /api/v2/markets/tickers which returns rich data on the free tier.
  * @param {string} symbol   e.g. "AAPL", "RELIANCE.NS"
  * @param {string} apiKey
  * @returns {Promise<object|null>}
  */
 async function fetchRapidApiQuote(symbol, apiKey) {
   try {
+    // Primary: /api/v2/markets/tickers?tickers=SYMBOL (returns array with full quote)
     const res = await fetch(
-      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=financial-data,default-key-statistics,summary-detail,price`,
+      `https://${RAPIDAPI_HOST}/api/v2/markets/tickers?tickers=${encodeURIComponent(symbol)}&type=STOCKS`,
       {
         headers: {
           "x-rapidapi-host": RAPIDAPI_HOST,
@@ -51,55 +53,57 @@ async function fetchRapidApiQuote(symbol, apiKey) {
       return null;
     }
 
-    const json = await res.json();
+    const text = await res.text();
+    // Guard against HTML error pages
+    if (text.trimStart().startsWith("<")) {
+      console.warn(`[Finance] RapidAPI returned HTML for ${symbol} — wrong endpoint or key issue`);
+      return null;
+    }
 
-    // Check for API-level errors
+    const json = JSON.parse(text);
+
     if (json?.message || json?.error) {
       console.warn(`[Finance] RapidAPI error for ${symbol}: ${(json.message ?? json.error ?? "").slice(0, 120)}`);
       return null;
     }
 
-    const body = json?.body ?? json;
-    const price         = body?.price ?? {};
-    const summaryDetail = body?.summaryDetail ?? {};
-    const financialData = body?.financialData ?? {};
-    const keyStats      = body?.defaultKeyStatistics ?? {};
+    // Response shape: { body: [{ ...quote fields }] } or { data: [...] }
+    const items = json?.body ?? json?.data ?? json?.result ?? [];
+    const q = Array.isArray(items) ? items[0] : items;
+
+    if (!q) {
+      console.warn(`[Finance] RapidAPI empty body for ${symbol}`);
+      return null;
+    }
 
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
-    // RapidAPI wraps values in { raw, fmt } objects
-    const raw = (obj) => (typeof obj === "object" && obj !== null ? obj.raw ?? obj : obj);
-
-    const currentPrice = safeNum(raw(price.regularMarketPrice));
-    const marketCap    = safeNum(raw(price.marketCap ?? summaryDetail.marketCap));
-
+    const currentPrice = safeNum(q.regularMarketPrice ?? q.price ?? q.currentPrice);
     if (!currentPrice) {
       console.warn(`[Finance] RapidAPI no price for ${symbol}`);
       return null;
     }
 
-    console.log(`[Finance] RapidAPI ✓ ${symbol} @ ${raw(price.currency) ?? "USD"} ${currentPrice}`);
+    console.log(`[Finance] RapidAPI ✓ ${symbol} @ ${q.currency ?? "USD"} ${currentPrice}`);
+
+    const isIndian = symbol.endsWith(".NS") || symbol.endsWith(".BO");
 
     return {
       currentPrice,
-      marketCap,
-      peRatio:            safeNum(raw(summaryDetail.trailingPE ?? keyStats.trailingPE)),
-      eps:                safeNum(raw(keyStats.trailingEps)),
-      revenue:            safeNum(raw(financialData.totalRevenue)),
-      netIncome:          safeNum(
-        raw(financialData.profitMargins) != null && raw(financialData.totalRevenue) != null
-          ? raw(financialData.totalRevenue) * raw(financialData.profitMargins)
-          : null
-      ),
-      debtToEquity:       safeNum(raw(financialData.debtToEquity)),
-      profitMargin:       safeNum(raw(financialData.profitMargins)),
-      week52High:         safeNum(raw(summaryDetail.fiftyTwoWeekHigh)),
-      week52Low:          safeNum(raw(summaryDetail.fiftyTwoWeekLow)),
-      analystTargetPrice: safeNum(raw(financialData.targetMeanPrice)),
-      revenueGrowth:      safeNum(raw(financialData.revenueGrowth)),
-      currency:           raw(price.currency) ?? (symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "INR" : "USD"),
-      shortName:          raw(price.shortName) ?? raw(price.longName) ?? symbol,
+      marketCap:          safeNum(q.marketCap),
+      peRatio:            safeNum(q.trailingPE ?? q.peRatio ?? q.pe),
+      eps:                safeNum(q.epsTrailingTwelveMonths ?? q.eps),
+      revenue:            safeNum(q.totalRevenue ?? q.revenue),
+      netIncome:          safeNum(q.netIncome),
+      debtToEquity:       safeNum(q.debtToEquity),
+      profitMargin:       safeNum(q.profitMargins ?? q.profitMargin),
+      week52High:         safeNum(q.fiftyTwoWeekHigh ?? q.week52High),
+      week52Low:          safeNum(q.fiftyTwoWeekLow ?? q.week52Low),
+      analystTargetPrice: safeNum(q.targetMeanPrice ?? q.analystTargetPrice),
+      revenueGrowth:      safeNum(q.revenueGrowth),
+      currency:           q.currency ?? (isIndian ? "INR" : "USD"),
+      shortName:          q.shortName ?? q.longName ?? q.displayName ?? symbol,
       yahooSymbol:        symbol,
       source:             "rapidapi-yahoo",
     };
@@ -129,13 +133,15 @@ async function searchRapidApiSymbol(query, apiKey) {
     );
     if (!res.ok) return null;
 
-    const json = await res.json();
-    const quotes = json?.body?.quotes ?? json?.quotes ?? [];
+    const text = await res.text();
+    if (text.trimStart().startsWith("<")) return null;
+    const json = JSON.parse(text);
+
+    const quotes = json?.body?.quotes ?? json?.body ?? json?.quotes ?? [];
     if (!Array.isArray(quotes) || quotes.length === 0) return null;
 
     const queryLower = query.toLowerCase();
-    // Prefer equity type, prefer name match
-    const equities = quotes.filter((q) => q.quoteType === "EQUITY" || !q.quoteType);
+    const equities = quotes.filter((q) => !q.quoteType || q.quoteType === "EQUITY");
     const match =
       equities.find((q) =>
         (q.shortname ?? q.longname ?? "").toLowerCase().includes(queryLower)
