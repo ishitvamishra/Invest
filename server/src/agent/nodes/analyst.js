@@ -30,23 +30,52 @@ Use \\n for paragraph breaks (not literal newlines). Keep analystCommentary to 2
 
 /**
  * Build the research payload sent to the analyst LLM.
+ * Aggressively trimmed to stay under ~6000 tokens for all providers.
  * @param {object} state
  */
 function buildResearchPayload(state) {
+  const news = (state.newsResults ?? []).slice(0, 4).map((r) => ({
+    title: r.title?.slice(0, 80),
+    snippet: r.snippet?.slice(0, 120),
+    sentiment: r.sentiment,
+  }));
+
+  const web = (state.webResearch ?? []).slice(0, 5).map((r) => ({
+    query: r.query?.slice(0, 60),
+    snippet: r.snippet?.slice(0, 100),
+  }));
+
+  const fd = state.financialData
+    ? {
+        price: state.financialData.currentPrice,
+        marketCap: state.financialData.marketCap,
+        pe: state.financialData.peRatio,
+        eps: state.financialData.eps,
+        margin: state.financialData.profitMargin,
+        debtEquity: state.financialData.debtToEquity,
+        revenueGrowth: state.financialData.revenueGrowth,
+        week52High: state.financialData.week52High,
+        week52Low: state.financialData.week52Low,
+        currency: state.financialData.currency,
+      }
+    : null;
+
+  const comp = state.competitorAnalysis
+    ? {
+        summary: state.competitorAnalysis.competitorSummary?.slice(0, 300),
+        competitors: (state.competitorAnalysis.mainCompetitors ?? []).slice(0, 4),
+      }
+    : null;
+
   return {
-    companyName: state.companyName,
-    ticker: state.ticker,
+    company: `${state.companyName} (${state.ticker ?? "?"})`,
     exchange: state.exchange,
     riskAppetite: state.riskAppetite,
-    financialData: state.financialData ?? "Financial data unavailable",
+    financialData: fd,
     sentimentScore: state.sentimentScore,
-    newsResults: state.newsResults?.slice(0, 6),
-    webResearch: state.webResearch?.slice(0, 8).map((r) => ({
-      query: r.query,
-      title: r.title,
-      snippet: r.snippet?.slice(0, 150),
-    })),
-    competitorAnalysis: state.competitorAnalysis,
+    news,
+    web,
+    competitors: comp,
   };
 }
 
