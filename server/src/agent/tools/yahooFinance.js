@@ -26,8 +26,8 @@ function getKeys(baseName) {
 
 /**
  * Fetch quote + details from Polygon for a US ticker.
- * Uses /v2/snapshot/locale/us/markets/stocks/tickers/:ticker
- * and /v3/reference/tickers/:ticker for fundamentals.
+ * Uses /v2/aggs/ticker/:ticker/prev (free tier compatible — previous close)
+ * and /v3/reference/tickers/:ticker for company details.
  * @param {string} symbol  Plain US ticker, e.g. "AAPL", "CRM"
  * @param {string} apiKey
  * @returns {Promise<object|null>}
@@ -37,9 +37,9 @@ async function fetchPolygonData(symbol, apiKey) {
   if (symbol.includes(".")) return null;
 
   try {
-    const [snapRes, detailRes] = await Promise.all([
+    const [prevRes, detailRes] = await Promise.all([
       fetch(
-        `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(symbol)}?apiKey=${apiKey}`,
+        `https://api.polygon.io/v2/aggs/ticker/${encodeURIComponent(symbol)}/prev?adjusted=true&apiKey=${apiKey}`,
         { signal: AbortSignal.timeout(10000) }
       ),
       fetch(
@@ -48,26 +48,23 @@ async function fetchPolygonData(symbol, apiKey) {
       ),
     ]);
 
-    if (!snapRes.ok) {
-      if (snapRes.status === 429) console.warn(`[Finance] Polygon rate-limited for ${symbol}`);
-      else console.warn(`[Finance] Polygon HTTP ${snapRes.status} for ${symbol}`);
+    if (!prevRes.ok) {
+      if (prevRes.status === 429) console.warn(`[Finance] Polygon rate-limited for ${symbol}`);
+      else console.warn(`[Finance] Polygon HTTP ${prevRes.status} for ${symbol}`);
       return null;
     }
 
-    const snapJson = await snapRes.json();
+    const prevJson = await prevRes.json();
     const detailJson = detailRes.ok ? await detailRes.json() : {};
 
-    // Polygon wraps result in { ticker: { ... } }
-    const t = snapJson?.ticker;
-    const day = t?.day ?? {};
-    const prevDay = t?.prevDay ?? {};
+    // /v2/aggs returns { results: [{ c, h, l, o, v, ... }] }
+    const bar = prevJson?.results?.[0];
     const details = detailJson?.results ?? {};
 
     const safeNum = (v) =>
       v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
 
-    // Use current day price, fall back to prev day close
-    const currentPrice = safeNum(day.c ?? prevDay.c);
+    const currentPrice = safeNum(bar?.c); // closing price
     const marketCap = safeNum(details.market_cap);
 
     if (!currentPrice) {
@@ -80,14 +77,14 @@ async function fetchPolygonData(symbol, apiKey) {
     return {
       currentPrice,
       marketCap,
-      peRatio: null,          // not on Polygon free tier
+      peRatio: null,
       eps: null,
       revenue: null,
       netIncome: null,
       debtToEquity: null,
       profitMargin: null,
-      week52High: safeNum(details.week_52_high ?? t?.todaysChangePerc),
-      week52Low: safeNum(details.week_52_low),
+      week52High: safeNum(details.week_52_high ?? null),
+      week52Low: safeNum(details.week_52_low ?? null),
       analystTargetPrice: null,
       revenueGrowth: null,
       currency: "USD",
