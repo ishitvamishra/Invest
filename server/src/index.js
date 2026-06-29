@@ -59,5 +59,5 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Investment Research Agent server running on http://localhost:${PORT}`);
-  console.log(`CORS enabled for: ${CLIENT_URL}`);
+  console.log(`CORS enabled for: ${allowedOrigins.join(", ")}`);
 });
