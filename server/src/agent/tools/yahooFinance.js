@@ -172,10 +172,8 @@ export function buildYahooSymbols(ticker, exchange = null) {
     }
   }
 
-  // Only add Indian suffixes (.NS/.BO) when there is an Indian exchange hint.
-  // Adding them unconditionally causes US tickers (AAPL, AMZN, etc.) to fail
-  // every variant because Yahoo Finance has no AAPL.NS or AAPL.BO listing.
-  const isIndianHint = exchangeKey.includes("NSE") ||
+  const isIndianHint =
+    exchangeKey.includes("NSE") ||
     exchangeKey.includes("BSE") ||
     exchangeKey.includes("INDIA") ||
     exchangeKey.includes("BOMBAY");
@@ -192,7 +190,7 @@ export function buildYahooSymbols(ticker, exchange = null) {
 
 /**
  * Fetch comprehensive financial data for a ticker symbol.
- * Strategy: Alpha Vantage (cloud-safe) → Yahoo Finance (may be blocked on cloud)
+ * Strategy: Yahoo Finance first (no rate limits) → Alpha Vantage fallback
  * @param {string} ticker
  * @param {string|null} exchange
  * @param {string|null} companyName
@@ -202,46 +200,62 @@ export async function fetchFinancialData(ticker, exchange = null, companyName = 
   if (!ticker && !companyName) return null;
 
   const symbolsToTry = buildYahooSymbols(ticker, exchange);
-  const primarySymbol = symbolsToTry[0]; // bare ticker like "NVDA"
 
-  // ── 1. Try Alpha Vantage first (reliable on cloud servers) ──
-  if (primarySymbol) {
-    const avData = await fetchFromAlphaVantage(primarySymbol);
-    if (avData) return avData;
-
-    // For Indian stocks also try with exchange suffix
-    if (symbolsToTry.length > 1) {
-      for (const sym of symbolsToTry.slice(1)) {
-        const avData2 = await fetchFromAlphaVantage(sym);
-        if (avData2) return avData2;
-      }
-    }
-  }
-
-  // ── 2. Fall back to Yahoo Finance (works locally; may be blocked in cloud) ──
+  // ── 1. Try Yahoo Finance first (no rate limits, rich data) ──
   for (const symbol of symbolsToTry) {
     const data = await fetchQuoteSummary(symbol);
     if (data) return data;
   }
 
+  // ── 2. If ticker looks Indian and no suffix tried yet, force .NS / .BO ──
+  const isLikelyIndian = !ticker?.includes(".") && (
+    (exchange ?? "").toUpperCase().match(/NSE|BSE|INDIA|BOMBAY/) ||
+    // Heuristic: all-caps Indian names without exchange hint
+    companyName?.match(/reliance|tata|infosys|wipro|hdfc|icici|bajaj|adani|airtel/i)
+  );
+
+  if (isLikelyIndian) {
+    const upper = (ticker ?? "").toUpperCase();
+    for (const suffix of [".NS", ".BO"]) {
+      const sym = `${upper}${suffix}`;
+      if (!symbolsToTry.includes(sym)) {
+        const data = await fetchQuoteSummary(sym);
+        if (data) return data;
+      }
+    }
+  }
+
+  // ── 3. Yahoo search by company name ──
   if (companyName) {
     const searchedSymbol = await searchYahooSymbol(companyName, exchange);
     if (searchedSymbol) {
-      // Try AV with searched symbol first
-      const avData = await fetchFromAlphaVantage(searchedSymbol);
-      if (avData) return avData;
-
       const data = await fetchQuoteSummary(searchedSymbol);
       if (data) return data;
+
+      // Also try Alpha Vantage with the searched symbol
+      const avData = await fetchFromAlphaVantage(searchedSymbol);
+      if (avData) return avData;
     }
 
     const webSymbol = await resolveSymbolViaWeb(companyName, exchange);
     if (webSymbol) {
-      const avData = await fetchFromAlphaVantage(webSymbol);
-      if (avData) return avData;
-
       const data = await fetchQuoteSummary(webSymbol);
       if (data) return data;
+
+      const avData = await fetchFromAlphaVantage(webSymbol);
+      if (avData) return avData;
+    }
+  }
+
+  // ── 4. Last resort: Alpha Vantage (rate-limited, but better than nothing) ──
+  const primarySymbol = symbolsToTry[0];
+  if (primarySymbol) {
+    const avData = await fetchFromAlphaVantage(primarySymbol);
+    if (avData) return avData;
+
+    for (const sym of symbolsToTry.slice(1)) {
+      const avData2 = await fetchFromAlphaVantage(sym);
+      if (avData2) return avData2;
     }
   }
 
