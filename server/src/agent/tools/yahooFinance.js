@@ -55,7 +55,7 @@ async function fetchRapidApiSupplemental(symbol, apiKey) {
 
     const json = JSON.parse(text);
     const body = json?.body ?? json?.data ?? json;
-
+    console.log(`[Finance] SUPPLEMENTAL RAW for ${symbol}:`, JSON.stringify(body, null, 2));
     const fd = body?.financialData ?? {};
     const ks = body?.defaultKeyStatistics ?? {};
 
