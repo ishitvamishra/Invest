@@ -25,7 +25,7 @@ function getKeys(baseName) {
 //    Env var: RAPIDAPI_KEY, RAPIDAPI_KEY_1, RAPIDAPI_KEY_2 ...
 // ─────────────────────────────────────────────────────────────────────────────
 
-const RAPIDAPI_HOST = "yahoo-finance15.p.rapidapi.com";
+const RAPIDAPI_HOST = "yahoo-finance166.p.rapidapi.com";
 
 /**
  * Fetch full quote summary from RapidAPI Yahoo Finance.
@@ -37,8 +37,15 @@ const RAPIDAPI_HOST = "yahoo-finance15.p.rapidapi.com";
 
 async function fetchRapidApiSupplemental(symbol, apiKey) {
   try {
+    const safeNum = (v) =>
+      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
+    const raw = (obj) =>
+      typeof obj === "object" && obj !== null ? obj.raw ?? obj : obj;
+
+    const region = symbol.endsWith(".NS") || symbol.endsWith(".BO") ? "IN" : "US";
+
     const res = await fetch(
-      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/modules?ticker=${encodeURIComponent(symbol)}&module=financial-data,default-key-statistics`,
+      `https://${RAPIDAPI_HOST}/api/stock/get-financial-data?symbol=${encodeURIComponent(symbol)}&region=${region}`,
       {
         headers: {
           "x-rapidapi-host": RAPIDAPI_HOST,
@@ -48,39 +55,45 @@ async function fetchRapidApiSupplemental(symbol, apiKey) {
       }
     );
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[Finance] Supplemental HTTP ${res.status} for ${symbol}`);
+      return null;
+    }
 
     const text = await res.text();
     if (text.trimStart().startsWith("<")) return null;
 
     const json = JSON.parse(text);
-    const body = json?.body ?? json?.data ?? json;
-    console.log(`[Finance] SUPPLEMENTAL RAW for ${symbol}:`, JSON.stringify(body, null, 2));
-    const fd = body?.financialData ?? {};
-    const ks = body?.defaultKeyStatistics ?? {};
+    const fd = json?.quoteSummary?.result?.[0]?.financialData ?? 
+               json?.financialData ?? 
+               json?.body?.financialData ?? {};
 
-    const safeNum = (v) =>
-      v !== undefined && v !== null && !Number.isNaN(Number(v)) ? Number(v) : null;
+    const netIncome = safeNum(raw(fd.netIncomeToCommon)) ?? (() => {
+      const rev = safeNum(raw(fd.totalRevenue));
+      const margin = safeNum(raw(fd.profitMargins));
+      return rev && margin ? Math.round(rev * margin) : null;
+    })();
 
-    // These objects have { raw, fmt } shape
-    const raw = (obj) => (typeof obj === "object" && obj !== null ? obj.raw ?? obj : obj);
+    console.log(`[Finance] Supplemental ✓ ${symbol}`);
 
     return {
       revenue:            safeNum(raw(fd.totalRevenue)),
-      netIncome:          safeNum(raw(fd.netIncomeToCommon) ?? raw(ks.netIncomeToCommon)),
+      netIncome,
       debtToEquity:       safeNum(raw(fd.debtToEquity)),
       profitMargin:       safeNum(raw(fd.profitMargins)),
       analystTargetPrice: safeNum(raw(fd.targetMeanPrice)),
       revenueGrowth:      safeNum(raw(fd.revenueGrowth)),
     };
-  } catch {
+  } catch (err) {
+    console.warn(`[Finance] Supplemental exception for ${symbol}: ${err.message}`);
     return null;
   }
 }
+
 async function fetchRapidApiQuote(symbol, apiKey) {
   try {
     const res = await fetch(
-      `https://${RAPIDAPI_HOST}/api/v1/markets/stock/quotes?ticker=${encodeURIComponent(symbol)}`,
+      `https://${RAPIDAPI_HOST}/api/market/get-quote?symbols=${encodeURIComponent(symbol)}`,
       {
         headers: {
           "x-rapidapi-host": RAPIDAPI_HOST,
@@ -102,17 +115,11 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     }
 
     const json = JSON.parse(text);
-
-    if (json?.message || json?.error) {
-      console.warn(`[Finance] RapidAPI error for ${symbol}: ${(json.message ?? json.error ?? "").slice(0, 120)}`);
-      return null;
-    }
-
-    const items = json?.body ?? json?.data ?? json?.result ?? [];
+    const items = json?.quoteResponse?.result ?? json?.body ?? [];
     const q = Array.isArray(items) ? items[0] : items;
 
     if (!q) {
-      console.warn(`[Finance] RapidAPI empty body for ${symbol}`);
+      console.warn(`[Finance] RapidAPI empty result for ${symbol}`);
       return null;
     }
 
@@ -121,14 +128,12 @@ async function fetchRapidApiQuote(symbol, apiKey) {
 
     const currentPrice = safeNum(q.regularMarketPrice);
     if (!currentPrice) {
-      console.warn(`[Finance] RapidAPI no price for ${symbol}`);
+      console.warn(`[Finance] RapidAPI no price for ${symbol}. Keys: ${Object.keys(q).slice(0, 10).join(", ")}`);
       return null;
     }
 
-    // Fetch supplemental data (revenue, netIncome, debtToEquity, analystTarget)
     const extra = await fetchRapidApiSupplemental(symbol, apiKey);
 
-    // Parse analyst rating from "2.5 - Buy" format
     const analystRatingRaw = q.averageAnalystRating ?? "";
     const analystRatingScore = safeNum(analystRatingRaw.split(" - ")[0]);
 
@@ -150,7 +155,6 @@ async function fetchRapidApiQuote(symbol, apiKey) {
       twoHundredDayAvg:   safeNum(q.twoHundredDayAverage),
       analystRating:      analystRatingRaw || null,
       analystRatingScore,
-      // From supplemental call
       revenue:            extra?.revenue ?? null,
       netIncome:          extra?.netIncome ?? null,
       debtToEquity:       extra?.debtToEquity ?? null,
@@ -167,7 +171,6 @@ async function fetchRapidApiQuote(symbol, apiKey) {
     return null;
   }
 }
-
 /**
  * Search for a symbol using RapidAPI Yahoo Finance search endpoint.
  * @param {string} query

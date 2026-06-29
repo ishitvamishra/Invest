@@ -59,6 +59,36 @@ app.use((err, _req, res, _next) => {
   }
 });
 
+app.get("/test-supplemental", async (req, res) => {
+  const apiKey = process.env.RAPIDAPI_KEY_1;
+  const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/stock/modules?ticker=INFY&module=financial-data,default-key-statistics`;
+  
+  const response = await fetch(url, {
+    headers: {
+      "x-rapidapi-host": "yahoo-finance166.p.rapidapi.com",
+      "x-rapidapi-key": apiKey,
+    }
+  });
+
+  const text = await response.text();
+  res.send({ status: response.status, body: text });
+});
+
+app.get("/test-fin", async (req, res) => {
+  const apiKey = process.env.RAPIDAPI_KEY_1;
+  const url = `https://yahoo-finance166.p.rapidapi.com/api/stock/get-financial-data?symbol=INFY&region=US`;
+  
+  const response = await fetch(url, {
+    headers: {
+      "x-rapidapi-host": "yahoo-finance166.p.rapidapi.com",
+      "x-rapidapi-key": apiKey,
+    }
+  });
+
+  const json = await response.json();
+  res.json(json);
+});
+
 app.listen(PORT, () => {
   console.log(`Investment Research Agent server running on http://localhost:${PORT}`);
   console.log(`CORS enabled for: ${allowedOrigins.join(", ")}`);
